@@ -1,0 +1,177 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500&family=Lato:wght@300;400;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: 'Cormorant Garamond';
+  --font-body: 'Lato';
+  --color-bg: #fdfbf7;
+  --color-surface: #ffffff;
+  --color-border: #e8e4db;
+  --color-border-strong: #cfc8b8;
+  --color-text: #1a1612;
+  --color-text-muted: #7d6f55;
+  --color-accent: #c9a84c;
+  --color-accent-hover: #b8962e;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body), sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-text-muted); }
+
+/* ─── Focus ring ─── */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ─── Selection ─── */
+::selection {
+  background: rgba(201,168,76,0.2);
+  color: var(--color-text);
+}
+
+/* ─── Typography ─── */
+h1, h2, h3, h4 { font-family: var(--font-display), serif; font-weight: 500; line-height: 1.2; }
+
+/* ─── Utility layers ─── */
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-sans text-sm font-medium
+           bg-ink-900 text-parchment-100 hover:bg-ink-800
+           transition-all duration-200 select-none cursor-pointer;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-sans text-sm font-medium
+           bg-white text-ink-800 border border-ink-200 hover:bg-parchment-50 hover:border-ink-300
+           transition-all duration-200 select-none cursor-pointer;
+  }
+  .btn-gold {
+    @apply inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-sans text-sm font-medium
+           text-ink-900 transition-all duration-200 select-none cursor-pointer;
+    background: linear-gradient(135deg, #c9a84c 0%, #e8c96d 50%, #c9a84c 100%);
+    background-size: 200% 100%;
+  }
+  .btn-gold:hover { background-position: right center; }
+  .btn-danger {
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-sans text-sm font-medium
+           bg-red-50 text-red-700 border border-red-200 hover:bg-red-100
+           transition-all duration-200 select-none cursor-pointer;
+  }
+
+  .card {
+    @apply bg-white rounded-xl border border-ink-100 shadow-soft;
+  }
+  .card-hover {
+    @apply card hover:shadow-medium hover:border-ink-200 transition-all duration-200 cursor-pointer;
+  }
+
+  .input {
+    @apply w-full px-3.5 py-2.5 rounded-lg border border-ink-200 bg-white text-ink-900
+           text-sm placeholder:text-ink-400 focus:outline-none focus:border-accent-gold focus:ring-2
+           focus:ring-accent-gold/20 transition-all duration-150;
+  }
+  .label {
+    @apply block text-xs font-medium text-ink-600 uppercase tracking-wider mb-1.5;
+  }
+
+  .section-title {
+    @apply font-display text-2xl text-ink-900 font-medium;
+  }
+  .section-sub {
+    @apply text-sm text-ink-500 mt-1;
+  }
+
+  .step-badge {
+    @apply w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold font-sans
+           bg-ink-900 text-parchment-100 flex-shrink-0;
+  }
+  .step-badge-done {
+    @apply w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold font-sans
+           bg-accent-gold text-ink-900 flex-shrink-0;
+  }
+  .step-badge-inactive {
+    @apply w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold font-sans
+           bg-ink-100 text-ink-400 flex-shrink-0;
+  }
+
+  .shimmer {
+    background: linear-gradient(90deg, var(--color-border) 25%, var(--color-border-strong) 50%, var(--color-border) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+}
+
+/* ─── Prose ornament ─── */
+.ornament {
+  display: flex; align-items: center; gap: 12px; color: var(--color-text-muted);
+}
+.ornament::before, .ornament::after {
+  content: ''; flex: 1; height: 1px; background: var(--color-border);
+}
+
+/* ─── Canvas wrapper ─── */
+.canvas-shadow {
+  box-shadow:
+    0 0 0 1px rgba(26,22,18,0.06),
+    0 4px 20px rgba(26,22,18,0.12),
+    0 20px 60px rgba(26,22,18,0.08);
+}
+
+/* ─── Rich text editor ─── */
+.rich-editor {
+  min-height: 80px;
+  line-height: 1.6;
+  font-size: 14px;
+}
+.rich-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+.rich-editor:focus { outline: none; }
+
+/* ─── Loading overlay ─── */
+.loading-overlay {
+  position: fixed; inset: 0;
+  background: rgba(253,251,247,0.85);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+}
+
+/* ─── Step connector ─── */
+.step-connector {
+  width: 1px;
+  background: linear-gradient(to bottom, var(--color-border), transparent);
+  margin: 4px 0 4px 11px;
+  height: 20px;
+}
+
+/* ─── Toast ─── */
+.toast-enter { animation: slideUp 0.3s ease-out; }
