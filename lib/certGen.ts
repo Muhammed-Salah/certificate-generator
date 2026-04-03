@@ -1,6 +1,7 @@
-import type { Template, TemplateConfig, TextField, RichTextField, FontRecord } from '@/types';
+import type { Template, TemplateConfig, TextField, RichTextField } from '@/types';
 import { PDFDocument, rgb, degrees, StandardFonts, PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import { fetchGoogleFontBytes } from './googleFonts';
 
 // Helper to convert hex to RGB for pdf-lib
 function hexToRgb(hex: string) {
@@ -26,17 +27,17 @@ export function applyCase(text: string, transform: TextField['case_transform']):
 /**
  * Measure text width on a canvas context.
  */
-function measureText(ctx: CanvasRenderingContext2D, text: string, fontSize: number, font: string): number {
-  ctx.font = `${fontSize}px "${font}"`;
+function measureText(ctx: CanvasRenderingContext2D, text: string, fontSize: number, font: string, fontWeight: number = 400): number {
+  ctx.font = `${fontWeight} ${fontSize}px "${font}"`;
   return ctx.measureText(text).width;
 }
 
 /**
  * Auto-shrink font size until text fits within maxPx.
  */
-function fitFontSize(ctx: CanvasRenderingContext2D, text: string, font: string, desiredSize: number, maxPx: number): number {
+function fitFontSize(ctx: CanvasRenderingContext2D, text: string, font: string, desiredSize: number, maxPx: number, fontWeight: number = 400): number {
   let size = desiredSize;
-  while (size > 8 && measureText(ctx, text, size, font) > maxPx) {
+  while (size > 8 && measureText(ctx, text, size, font, fontWeight) > maxPx) {
     size = Math.max(8, size - 1);
   }
   return size;
@@ -96,17 +97,40 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
   
   // Embed fonts
   const embeddedFonts: Record<string, PDFFont> = {};
-  for (const fontName in fontBytes) {
-    embeddedFonts[fontName] = await pdfDoc.embedFont(fontBytes[fontName]);
+  const neededFonts = new Set<{ family: string; weight: number }>();
+  neededFonts.add({ family: config.name_field.font_family,     weight: config.name_field.font_weight || 400 });
+  if (config.description_field) {
+    neededFonts.add({ family: config.description_field.font_family, weight: config.description_field.font_weight || 400 });
+  }
+  (config.additional_fields || []).forEach((f: TextField) => {
+    neededFonts.add({ family: f.font_family, weight: f.font_weight || 400 });
+  });
+
+  for (const { family, weight } of Array.from(neededFonts)) {
+    const key = `${family}-${weight}`;
+    if (fontBytes[key]) {
+      embeddedFonts[key] = await pdfDoc.embedFont(fontBytes[key]);
+    } else if (fontBytes[family]) {
+      embeddedFonts[key] = await pdfDoc.embedFont(fontBytes[family]);
+    } else {
+      // Try to fetch Google Font on the fly if not provided
+      const bytes = await fetchGoogleFontBytes(family, weight);
+      if (bytes) {
+        embeddedFonts[key] = await pdfDoc.embedFont(bytes);
+      }
+    }
   }
   const standardFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-  const getFont = (name: string) => embeddedFonts[name] || standardFont;
+  const getFont = (family: string, weight?: number) => {
+    const key = `${family}-${weight || 400}`;
+    return embeddedFonts[key] || embeddedFonts[family] || standardFont;
+  };
 
   /* ─── Name field ─── */
   const nf = config.name_field;
   const displayName = applyCase(name.trim(), nf.case_transform);
-  const font = getFont(nf.font_family);
+  const font = getFont(nf.font_family, nf.font_weight);
   const color = hexToRgb(nf.font_color);
   
   let fontSize = nf.font_size * 0.75; // Convert px to pt approx
@@ -141,7 +165,7 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
       if (!val.trim()) continue;
 
       const dispVal = applyCase(val.trim(), field.case_transform);
-      const fFont = getFont(field.font_family);
+      const fFont = getFont(field.font_family, field.font_weight);
       const fColor = hexToRgb(field.font_color);
       let fSize = field.font_size * 0.75;
       const fx = field.x * width;
@@ -169,7 +193,7 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
      const dBoxW = df.width * width;
      const dFontSize = df.font_size * 0.75;
      const dColor = hexToRgb(df.font_color);
-     const dFont = getFont(df.font_family);
+     const dFont = getFont(df.font_family, df.font_weight);
      const lineH = dFontSize * 1.35;
 
      const fragments = parseHtmlToFragments(descriptionHtml);
@@ -292,6 +316,20 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
   const scale = opts.scale || 1.0;
   if (!templateImageBitmap) throw new Error('Template image bitmap is required for canvas rendering');
 
+  // Ensure all fonts are loaded before rendering
+  const usedFonts = new Set<{ family: string; weight: number }>();
+  usedFonts.add({ family: config.name_field.font_family, weight: config.name_field.font_weight || 400 });
+  if (config.description_field) usedFonts.add({ family: config.description_field.font_family, weight: config.description_field.font_weight || 400 });
+  (config.additional_fields || []).forEach((f: TextField) => usedFonts.add({ family: f.font_family, weight: f.font_weight || 400 }));
+
+  await Promise.all(
+    Array.from(usedFonts).map(({ family, weight }) => {
+      if (!family) return Promise.resolve();
+      return document.fonts.load(`${weight} 1em "${family}"`);
+    })
+  );
+  await document.fonts.ready;
+
   // Use the bitmap as source of truth for proportions and baseline quality
   let W = template.width * scale;
   let H = template.height * scale;
@@ -333,12 +371,13 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
   const maxW = nf.max_width * W;
 
   let fontSize = nf.font_size * scale;
+  const nWeight = nf.font_weight || 400;
   if (nf.auto_size) {
-    fontSize = fitFontSize(ctx, displayName, nf.font_family, fontSize, maxW);
+    fontSize = fitFontSize(ctx, displayName, nf.font_family, fontSize, maxW, nWeight);
   }
 
   ctx.save();
-  ctx.font = `${nf.case_transform === 'small-caps' ? 'small-caps ' : ''}${fontSize}px "${nf.font_family}"`;
+  ctx.font = `${nWeight} ${nf.case_transform === 'small-caps' ? 'small-caps ' : ''}${fontSize}px "${nf.font_family}"`;
   ctx.fillStyle = nf.font_color;
   ctx.textAlign = nf.alignment as CanvasTextAlign;
   ctx.textBaseline = 'middle';
@@ -357,12 +396,13 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
       const fMaxW = field.max_width * W;
 
       let fFontSize = field.font_size * scale;
+      const fWeight = field.font_weight || 400;
       if (field.auto_size) {
-        fFontSize = fitFontSize(ctx, dispVal, field.font_family, fFontSize, fMaxW);
+        fFontSize = fitFontSize(ctx, dispVal, field.font_family, fFontSize, fMaxW, fWeight);
       }
 
       ctx.save();
-      ctx.font = `${field.case_transform === 'small-caps' ? 'small-caps ' : ''}${fFontSize}px "${field.font_family}"`;
+      ctx.font = `${fWeight} ${field.case_transform === 'small-caps' ? 'small-caps ' : ''}${fFontSize}px "${field.font_family}"`;
       ctx.fillStyle = field.font_color;
       ctx.textAlign = field.alignment as CanvasTextAlign;
       ctx.textBaseline = 'middle';
@@ -445,7 +485,8 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
 
       // Helper to set font based on style
       const setCtxFont = (bold: boolean, italic: boolean) => {
-        ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${dFontSize}px "${df.font_family}"`;
+        const weight = bold ? 700 : (df.font_weight || 400);
+        ctx.font = `${italic ? 'italic ' : ''}${weight} ${dFontSize}px "${df.font_family}"`;
       };
 
       fragments.forEach(frag => {

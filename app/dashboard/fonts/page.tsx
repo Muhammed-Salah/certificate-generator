@@ -11,6 +11,7 @@ export default function FontsPage() {
   const [loading, setLoading]     = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError]         = useState('');
+  const [fontUrls, setFontUrls]   = useState<Record<string, string>>({});
   const supabase = useMemo(() => createClient(), []);
 
   const load = useCallback(async () => {
@@ -22,35 +23,52 @@ export default function FontsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  /* Fetch signed URLs for private fonts */
+  useEffect(() => {
+    if (fonts.length === 0) return;
+    (async () => {
+      const newUrls: Record<string, string> = {};
+      for (const f of fonts) {
+        const { data } = await supabase.storage.from('fonts').createSignedUrl(f.file_path, 3600);
+        if (data) newUrls[f.id] = data.signedUrl;
+      }
+      setFontUrls(newUrls);
+    })();
+  }, [fonts, supabase]);
+
   /* Inject fonts for preview */
   useEffect(() => {
-    fonts.forEach(f => {
+    Object.entries(fontUrls).forEach(([id, url]) => {
+      const f = fonts.find(v => v.id === id);
+      if (!f) return;
       const sid = `font-face-${f.id}`;
       if (document.getElementById(sid)) return;
-      const { data } = supabase.storage.from('fonts').getPublicUrl(f.file_path);
       const s = document.createElement('style');
       s.id = sid;
-      s.textContent = `@font-face { font-family: '${f.name}'; src: url('${data.publicUrl}'); }`;
+      s.textContent = `@font-face { font-family: '${f.name}'; src: url('${url}'); }`;
       document.head.appendChild(s);
     });
-  }, [fonts, supabase]);
+  }, [fontUrls, fonts]);
 
   const handleUpload = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
     setUploading(true); setError('');
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
       for (const file of files) {
         const ext      = file.name.split('.').pop()?.toLowerCase() as FontRecord['format'];
         const name     = file.name.replace(/\.[^/.]+$/, '');
         const safeName = file.name.replace(/\s/g, '_').replace(/[^a-zA-Z0-9._-]/g, '');
-        const path     = `${Date.now()}-${safeName}`;
+        const path     = `${user.id}/${Date.now()}-${safeName}`;
 
         const { error: upErr } = await supabase.storage
           .from('fonts').upload(path, file, { cacheControl: '3600', upsert: false });
         if (upErr) throw upErr;
 
         const { error: dbErr } = await supabase.from('fonts').insert({
-          name, file_path: path, format: ext,
+          name, file_path: path, format: ext, user_id: user.id
         });
         if (dbErr) throw dbErr;
       }

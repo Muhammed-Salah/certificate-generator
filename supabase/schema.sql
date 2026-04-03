@@ -25,12 +25,14 @@ CREATE TABLE IF NOT EXISTS template_configs (
   template_id         UUID NOT NULL UNIQUE REFERENCES templates(id) ON DELETE CASCADE,
   name_field          JSONB NOT NULL,
   description_field   JSONB,
+  additional_fields   JSONB DEFAULT '[]'::jsonb,
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ─── Fonts ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS fonts (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
   file_path   TEXT NOT NULL,
   format      TEXT NOT NULL CHECK (format IN ('ttf', 'otf', 'woff', 'woff2')),
@@ -83,10 +85,10 @@ CREATE POLICY "configs_delete" ON template_configs
     EXISTS (SELECT 1 FROM templates t WHERE t.id = template_configs.template_id AND t.user_id = auth.uid())
   );
 
--- Fonts: all authenticated users can read, any authenticated user can manage
-CREATE POLICY "fonts_select" ON fonts FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "fonts_insert" ON fonts FOR INSERT WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "fonts_delete" ON fonts FOR DELETE USING (auth.role() = 'authenticated');
+-- Fonts: only owner can read/write
+CREATE POLICY "fonts_select" ON fonts FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "fonts_insert" ON fonts FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "fonts_delete" ON fonts FOR DELETE USING (auth.uid() = user_id);
 
 -- ─── Storage Buckets ─────────────────────────────────────────
 -- Run these separately in Supabase Storage settings or SQL editor
@@ -99,10 +101,10 @@ VALUES (
   ARRAY['image/png', 'application/pdf']
 ) ON CONFLICT (id) DO NOTHING;
 
--- 2. Create 'fonts' bucket (public)
+-- 2. Create 'fonts' bucket (private)
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
-  'fonts', 'fonts', true,
+  'fonts', 'fonts', false,
   10485760, -- 10 MB
   ARRAY['font/ttf', 'font/otf', 'font/woff', 'font/woff2',
         'application/x-font-ttf', 'application/x-font-otf',
@@ -122,10 +124,10 @@ CREATE POLICY "templates_storage_delete" ON storage.objects
 
 -- Storage RLS policies for fonts bucket
 CREATE POLICY "fonts_storage_select" ON storage.objects
-  FOR SELECT USING (bucket_id = 'fonts');
+  FOR SELECT USING (bucket_id = 'fonts' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 CREATE POLICY "fonts_storage_insert" ON storage.objects
-  FOR INSERT WITH CHECK (bucket_id = 'fonts' AND auth.role() = 'authenticated');
+  FOR INSERT WITH CHECK (bucket_id = 'fonts' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 CREATE POLICY "fonts_storage_delete" ON storage.objects
-  FOR DELETE USING (bucket_id = 'fonts' AND auth.role() = 'authenticated');
+  FOR DELETE USING (bucket_id = 'fonts' AND (storage.foldername(name))[1] = auth.uid()::text);

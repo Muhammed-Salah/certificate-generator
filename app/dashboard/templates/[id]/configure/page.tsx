@@ -9,6 +9,8 @@ import {
   ChevronDown, Palette, Info, Grid3X3, Magnet, PlusCircle, Trash2
 } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
+import FontPicker from '@/components/FontPicker';
+import { loadGoogleFont, POPULAR_GOOGLE_FONTS, GOOGLE_FONT_WEIGHTS } from '@/lib/googleFonts';
 
 const SYSTEM_FONTS = [
   'Georgia', 'Times New Roman', 'Palatino', 'Arial',
@@ -46,6 +48,7 @@ export default function ConfigurePage() {
   const [imgNatH, setImgNatH]     = useState(1);
   const [pdfRendering, setPdfRendering] = useState(false);
   const [pdfDataUrl, setPdfDataUrl]     = useState<string | null>(null);
+  const [fontUrls, setFontUrls]         = useState<Record<string, string>>({});
 
   const [nameField, setNameField] = useState<TextField>({
     x: 0.5, y: 0.55, font_family: 'Georgia', font_size: 48,
@@ -111,27 +114,57 @@ export default function ConfigurePage() {
       if (cancelled) return;
       if (tpl) setTemplate(tpl as Template);
       if (cfg) {
-        if (cfg.name_field)        setNameField(cfg.name_field as TextField);
-        if (cfg.description_field) { setDescField(cfg.description_field as RichTextField); setShowDesc(true); }
-        if (cfg.additional_fields) setAdditionalFields(cfg.additional_fields as CustomTextField[]);
+        if (cfg.name_field) {
+           setNameField(cfg.name_field as TextField);
+           if (POPULAR_GOOGLE_FONTS.includes((cfg.name_field as TextField).font_family)) {
+             loadGoogleFont((cfg.name_field as TextField).font_family, (cfg.name_field as TextField).font_weight || 400);
+           }
+        }
+        if (cfg.description_field) { 
+           setDescField(cfg.description_field as RichTextField); 
+           setShowDesc(true); 
+           if (POPULAR_GOOGLE_FONTS.includes((cfg.description_field as RichTextField).font_family)) {
+             loadGoogleFont((cfg.description_field as RichTextField).font_family, (cfg.description_field as RichTextField).font_weight || 400);
+           }
+        }
+        if (cfg.additional_fields) {
+           setAdditionalFields(cfg.additional_fields as CustomTextField[]);
+           (cfg.additional_fields as CustomTextField[]).forEach(f => {
+             if (POPULAR_GOOGLE_FONTS.includes(f.font_family)) loadGoogleFont(f.font_family, f.font_weight || 400);
+           });
+        }
       }
       if (fnts) setFonts(fnts as FontRecord[]);
     })();
     return () => { cancelled = true; };
   }, [id, supabase]);
 
+  /* ─── Fetch signed URLs for private fonts ─── */
+  useEffect(() => {
+    if (fonts.length === 0) return;
+    (async () => {
+      const newUrls: Record<string, string> = {};
+      for (const f of fonts) {
+        const { data } = await supabase.storage.from('fonts').createSignedUrl(f.file_path, 3600);
+        if (data) newUrls[f.id] = data.signedUrl;
+      }
+      setFontUrls(newUrls);
+    })();
+  }, [fonts, supabase]);
+
   /* ─── Inject custom fonts ─── */
   useEffect(() => {
-    fonts.forEach(f => {
+    Object.entries(fontUrls).forEach(([id, url]) => {
+      const f = fonts.find(v => v.id === id);
+      if (!f) return;
       const sid = `font-face-${f.id}`;
       if (document.getElementById(sid)) return;
-      const { data } = supabase.storage.from('fonts').getPublicUrl(f.file_path);
       const s = document.createElement('style');
       s.id = sid;
-      s.textContent = `@font-face { font-family: '${f.name}'; src: url('${data.publicUrl}'); }`;
+      s.textContent = `@font-face { font-family: '${f.name}'; src: url('${url}'); font-weight: 100 900; }`;
       document.head.appendChild(s);
     });
-  }, [fonts, supabase]);
+  }, [fontUrls, fonts]);
 
   const templateUrl = useMemo(() => {
     if (!template) return '';
@@ -344,11 +377,6 @@ export default function ConfigurePage() {
     }
   }, [id, nameField, descField, showDesc, additionalFields, supabase, router]);
 
-  const allFonts = useMemo(
-    () => [...SYSTEM_FONTS, ...fonts.map(f => f.name)],
-    [fonts],
-  );
-
   const [configTab, setConfigTab] = useState<'main' | 'custom'>('main');
 
   /* ─── Render overlay dimensions ─── */
@@ -417,7 +445,8 @@ export default function ConfigurePage() {
                     window.__unsavedChanges = true;
                     if (k === 'max_width' || k === 'x' || k === 'alignment') triggerLimitGuide();
                   }}
-                  fonts={allFonts}
+                  fonts={fonts}
+                  systemFonts={SYSTEM_FONTS}
                   showColor={showNameColor}
                   onToggleColor={() => setShowNameColor(p => !p)}
                   onCloseColor={() => setShowNameColor(false)}
@@ -443,7 +472,8 @@ export default function ConfigurePage() {
                   <FieldControls
                     field={descField}
                     onChange={(k, v) => { setDescField(p => ({ ...p, [k]: v } as RichTextField)); window.__unsavedChanges = true; }}
-                    fonts={allFonts}
+                    fonts={fonts}
+                    systemFonts={SYSTEM_FONTS}
                     showColor={showDescColor}
                     onToggleColor={() => setShowDescColor(p => !p)}
                     onCloseColor={() => setShowDescColor(false)}
@@ -508,7 +538,8 @@ export default function ConfigurePage() {
                         setAdditionalFields(p => p.map(f => f.id === field.id ? { ...f, [k]: v } : f));
                         window.__unsavedChanges = true;
                       }}
-                      fonts={allFonts}
+                      fonts={fonts}
+                      systemFonts={SYSTEM_FONTS}
                       showColor={showCustomColor[field.id] || false}
                       onToggleColor={() => setShowCustomColor(p => ({ ...p, [field.id]: !p[field.id] }))}
                       onCloseColor={() => setShowCustomColor(p => ({ ...p, [field.id]: false }))}
@@ -653,6 +684,7 @@ export default function ConfigurePage() {
                      }}>
                   <span style={{
                     fontFamily:  nameField.font_family,
+                    fontWeight:  nameField.font_weight || 400,
                     fontSize:    nameField.font_size * (imgRef.current ? imgRef.current.clientWidth / imgNatW : 1),
                     color:       nameField.font_color,
                     textShadow:  '0 0 6px rgba(255,255,255,0.9)',
@@ -691,6 +723,7 @@ export default function ConfigurePage() {
                     className="w-full h-full overflow-hidden pointer-events-none p-1"
                     style={{
                       fontFamily: descField.font_family,
+                      fontWeight: descField.font_weight || 400,
                       fontSize:   descField.font_size * (imgRef.current ? imgRef.current.clientWidth / imgNatW : 1),
                       color:      descField.font_color,
                       textAlign:  descField.alignment,
@@ -742,6 +775,7 @@ export default function ConfigurePage() {
                        }}>
                     <span style={{
                       fontFamily:  field.font_family,
+                      fontWeight:  field.font_weight || 400,
                       fontSize:    field.font_size * (imgRef.current ? imgRef.current.clientWidth / imgNatW : 1),
                       color:       field.font_color,
                       textShadow:  '0 0 6px rgba(255,255,255,0.9)',
@@ -816,12 +850,13 @@ function NumericInput({ value, min, onChange, className }: { value: number; min:
 
 /* ─── FieldControls sub-component ─── */
 function FieldControls({
-  field, onChange, fonts, showColor, onToggleColor, onCloseColor,
+  field, onChange, fonts, systemFonts, showColor, onToggleColor, onCloseColor,
   showCaseTransform = false, showAutoSize = false, showMaxWidth = true,
 }: {
   field: TextField | RichTextField;
   onChange: (key: string, value: unknown) => void;
-  fonts: string[];
+  fonts: FontRecord[];
+  systemFonts: string[];
   showColor: boolean;
   onToggleColor: () => void;
   onCloseColor: () => void;
@@ -832,14 +867,34 @@ function FieldControls({
   return (
     <div className="space-y-3.5">
       {/* Font family */}
-      <div>
-        <label className="label">Font Family</label>
-        <div className="relative">
-          <select value={field.font_family} onChange={e => onChange('font_family', e.target.value)}
-                  className="input pr-8 appearance-none cursor-pointer" style={{ fontFamily: field.font_family }}>
-            {fonts.map(f => <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>)}
-          </select>
-          <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-400 pointer-events-none"/>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="label">Font Family</label>
+          <FontPicker
+            value={field.font_family}
+            onChange={v => {
+              onChange('font_family', v);
+              if (POPULAR_GOOGLE_FONTS.includes(v)) loadGoogleFont(v, field.font_weight || 400);
+            }}
+            systemFonts={systemFonts}
+            customFonts={fonts}
+          />
+        </div>
+        <div>
+          <label className="label">Font Weight</label>
+          <div className="relative">
+            <select 
+              value={field.font_weight || 400} 
+              onChange={e => {
+                const w = +e.target.value;
+                onChange('font_weight', w);
+                if (POPULAR_GOOGLE_FONTS.includes(field.font_family)) loadGoogleFont(field.font_family, w);
+              }}
+              className="input pr-8 appearance-none cursor-pointer">
+              {GOOGLE_FONT_WEIGHTS.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
+            </select>
+            <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-400 pointer-events-none"/>
+          </div>
         </div>
       </div>
 

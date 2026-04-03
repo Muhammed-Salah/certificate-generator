@@ -12,6 +12,7 @@ import {
   Users, Trash2, ChevronLeft, PackageOpen, Layers, X,
 } from 'lucide-react';
 import Papa from 'papaparse';
+import { loadGoogleFont, POPULAR_GOOGLE_FONTS, fetchGoogleFontBytes } from '@/lib/googleFonts';
 
 type Step      = 'select' | 'names' | 'generate';
 type OutFormat = 'png' | 'pdf';
@@ -51,6 +52,7 @@ export default function GeneratePage() {
   const [genProgress, setGenProgress] = useState({ done: 0, total: 0 });
   const [isGenerated, setIsGenerated] = useState(false);
   const [error, setError]             = useState('');
+  const [fontUrls, setFontUrls]       = useState<Record<string, string>>({});
 
   /* ─── Bitmap cache ─── */
   const bitmapRef   = useRef<ImageBitmap | null>(null);
@@ -81,18 +83,47 @@ export default function GeneratePage() {
     return () => { cancelled = true; };
   }, [supabase]);
 
-  /* ─── Inject custom fonts ─── */
+  /* ─── Fetch signed URLs for private fonts ─── */
   useEffect(() => {
-    fonts.forEach(f => {
+    if (fonts.length === 0) return;
+    (async () => {
+      const newUrls: Record<string, string> = {};
+      for (const f of fonts) {
+        const { data } = await supabase.storage.from('fonts').createSignedUrl(f.file_path, 3600);
+        if (data) newUrls[f.id] = data.signedUrl;
+      }
+      setFontUrls(newUrls);
+    })();
+  }, [fonts, supabase]);
+
+  /* ─── Inject custom and google fonts ─── */
+  useEffect(() => {
+    Object.entries(fontUrls).forEach(([id, url]) => {
+      const f = fonts.find(v => v.id === id);
+      if (!f) return;
       const sid = `font-face-${f.id}`;
       if (document.getElementById(sid)) return;
-      const { data } = supabase.storage.from('fonts').getPublicUrl(f.file_path);
       const s = document.createElement('style');
       s.id = sid;
-      s.textContent = `@font-face { font-family: '${f.name}'; src: url('${data.publicUrl}'); }`;
+      s.textContent = `@font-face { font-family: '${f.name}'; src: url('${url}'); font-weight: 100 900; }`;
       document.head.appendChild(s);
     });
-  }, [fonts, supabase]);
+  }, [fontUrls, fonts]);
+
+  // Handle Google Fonts loading for chosen templates
+  useEffect(() => {
+    if (!config) return;
+    const used = new Set<{ family: string; weight: number }>();
+    used.add({ family: config.name_field.font_family, weight: config.name_field.font_weight || 400 });
+    if (config.description_field) used.add({ family: config.description_field.font_family, weight: config.description_field.font_weight || 400 });
+    (config.additional_fields || []).forEach(f => used.add({ family: f.font_family, weight: f.font_weight || 400 }));
+
+    used.forEach(({ family, weight }) => {
+      if (family && POPULAR_GOOGLE_FONTS.includes(family)) {
+        loadGoogleFont(family, weight);
+      }
+    });
+  }, [config]);
 
   /* ─── Bitmap loader (cached) ─── */
   const getBitmap = useCallback(async (t: Template): Promise<ImageBitmap> => {
@@ -239,17 +270,25 @@ export default function GeneratePage() {
   /* ─── Generate ─── */
   const fetchFontBytes = useCallback(async () => {
     if (!config) return {};
-    const used = new Set([config.name_field.font_family, config.description_field?.font_family]);
-    (config.additional_fields || []).forEach(f => used.add(f.font_family));
+    const used = new Set<{ family: string; weight: number }>();
+    used.add({ family: config.name_field.font_family, weight: config.name_field.font_weight || 400 });
+    if (config.description_field) used.add({ family: config.description_field.font_family, weight: config.description_field.font_weight || 400 });
+    (config.additional_fields || []).forEach(f => used.add({ family: f.font_family, weight: f.font_weight || 400 }));
     
     const bytesMap: Record<string, ArrayBuffer> = {};
-    for (const name of Array.from(used)) {
-       if (!name) continue;
-       const fRec = fonts.find(f => f.name === name);
+    for (const { family, weight } of Array.from(used)) {
+       if (!family) continue;
+       const fRec = fonts.find(f => f.name === family);
+       const key = `${family}-${weight}`;
+
        if (fRec) {
-          const { data } = supabase.storage.from('fonts').getPublicUrl(fRec.file_path);
-          const res = await fetch(data.publicUrl);
-          bytesMap[name] = await res.arrayBuffer();
+          const { data, error } = await supabase.storage.from('fonts').download(fRec.file_path);
+          if (data) bytesMap[key] = await data.arrayBuffer();
+          if (error) console.error(`Error downloading font ${family}:`, error);
+       } else {
+          // It's a Google Font
+          const bytes = await fetchGoogleFontBytes(family, weight);
+          if (bytes) bytesMap[key] = bytes;
        }
     }
     return bytesMap;

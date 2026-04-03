@@ -36,6 +36,7 @@ export interface TextField {
   case_transform: 'none' | 'uppercase' | 'lowercase' | 'capitalize' | 'titlecase' | 'small-caps';
   max_width: number; // 0–1 fraction
   auto_size: boolean;
+  font_weight?: number;
 }
 
 export interface RichTextField {
@@ -48,10 +49,12 @@ export interface RichTextField {
   font_color: string;
   alignment: 'left' | 'center' | 'right';
   content: string; // HTML rich text default content
+  font_weight?: number;
 }
 
 export interface FontRecord {
   id: string;
+  user_id: string;
   name: string;
   file_path: string;
   format: 'ttf' | 'otf' | 'woff' | 'woff2';
