@@ -142,13 +142,16 @@ export default function GeneratePage() {
       }
     }
 
-    const { data } = supabase.storage.from('templates').getPublicUrl(t.file_path);
+    const { data: signedData } = await supabase.storage.from('templates').createSignedUrl(t.file_path, 3600);
+    if (!signedData) throw new Error('Could not get signed URL');
+    const templateUrl = signedData.signedUrl;
+
     let bitmap: ImageBitmap;
     if (t.file_type === 'pdf') {
-      const res = await loadPdfPageBitmap(data.publicUrl);
+      const res = await loadPdfPageBitmap(templateUrl);
       bitmap = res.bitmap;
     } else {
-      bitmap = await loadImageBitmap(data.publicUrl);
+      bitmap = await loadImageBitmap(templateUrl);
     }
     bitmapRef.current   = bitmap;
     bitmapTplId.current = t.id;
@@ -301,8 +304,9 @@ export default function GeneratePage() {
     setGenProgress({ done: 0, total: valid.length });
 
     try {
-      const { data: tData } = supabase.storage.from('templates').getPublicUrl(selected.file_path);
-      const templateUrl = tData.publicUrl;
+      const { data: signedData } = await supabase.storage.from('templates').createSignedUrl(selected.file_path, 3600);
+      if (!signedData) throw new Error('Could not get signed URL');
+      const templateUrl = signedData.signedUrl;
       
       const bitmap = outFormat === 'png' ? await getBitmap(selected) : null;
       const fontBytes = outFormat === 'pdf' ? await fetchFontBytes() : {};

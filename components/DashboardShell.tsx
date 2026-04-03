@@ -122,11 +122,13 @@ export default function DashboardShell({
         {/* User */}
         <div className="border-t border-ink-800 p-3">
           <div className="flex items-center gap-3 px-2 py-2 rounded-lg">
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-ink-900 flex-shrink-0"
-              style={{ background: "linear-gradient(135deg, #c9a84c, #e8c96d)" }}
-            >
-              {initials}
+            <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-ink-900 flex-shrink-0 overflow-hidden" 
+                 style={{ background: "linear-gradient(135deg, #c9a84c, #e8c96d)" }}>
+              {user.user_metadata?.avatar_url ? (
+                <img src={user.user_metadata.avatar_url} alt={user.user_metadata.full_name || 'User avatar'} className="w-full h-full object-cover" />
+              ) : (
+                initials
+              )}
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-xs font-medium text-parchment-100 truncate">

@@ -96,8 +96,8 @@ CREATE POLICY "fonts_delete" ON fonts FOR DELETE USING (auth.uid() = user_id);
 -- 1. Create 'templates' bucket (private)
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
-  'templates', 'templates', true,
-  52428800, -- 50 MB
+  'templates', 'templates', false,
+  5242880, -- 5 MB
   ARRAY['image/png', 'application/pdf']
 ) ON CONFLICT (id) DO NOTHING;
 
@@ -114,13 +114,13 @@ VALUES (
 
 -- Storage RLS policies for templates bucket
 CREATE POLICY "templates_storage_select" ON storage.objects
-  FOR SELECT USING (bucket_id = 'templates');
+  FOR SELECT USING (bucket_id = 'templates' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 CREATE POLICY "templates_storage_insert" ON storage.objects
-  FOR INSERT WITH CHECK (bucket_id = 'templates' AND auth.role() = 'authenticated');
+  FOR INSERT WITH CHECK (bucket_id = 'templates' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 CREATE POLICY "templates_storage_delete" ON storage.objects
-  FOR DELETE USING (bucket_id = 'templates' AND auth.role() = 'authenticated');
+  FOR DELETE USING (bucket_id = 'templates' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 -- Storage RLS policies for fonts bucket
 CREATE POLICY "fonts_storage_select" ON storage.objects

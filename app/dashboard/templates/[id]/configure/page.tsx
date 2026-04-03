@@ -166,10 +166,14 @@ export default function ConfigurePage() {
     });
   }, [fontUrls, fonts]);
 
-  const templateUrl = useMemo(() => {
-    if (!template) return '';
-    const { data } = supabase.storage.from('templates').getPublicUrl(template.file_path);
-    return data.publicUrl;
+  const [templateUrl, setTemplateUrl] = useState('');
+
+  useEffect(() => {
+    if (!template) return;
+    (async () => {
+      const { data } = await supabase.storage.from('templates').createSignedUrl(template.file_path, 3600);
+      if (data) setTemplateUrl(data.signedUrl);
+    })();
   }, [template, supabase]);
 
   /* ─── Render PDF to Canvas for background ─── */

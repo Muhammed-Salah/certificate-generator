@@ -14,6 +14,7 @@ export default function TemplatesPage() {
   const [error, setError]             = useState('');
   const [renamingId, setRenamingId]   = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [templateUrls, setTemplateUrls] = useState<Record<string, string>>({});
   const router   = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
@@ -23,7 +24,51 @@ export default function TemplatesPage() {
       .from('templates')
       .select('*')
       .order('created_at', { ascending: false });
-    if (!dbErr && data) setTemplates(data as Template[]);
+    
+    if (!dbErr && data) {
+      const templatesData = data as Template[];
+      setTemplates(templatesData);
+
+      // Cache Management: Fetch signed URLs only if not valid in localStorage
+      const CACHE_KEY = `cert-template-urls`;
+      const now = Date.now();
+      let cached: Record<string, { url: string; expires: number }> = {};
+      try {
+        const stored = localStorage.getItem(CACHE_KEY);
+        if (stored) cached = JSON.parse(stored);
+      } catch (e) {
+        console.warn('Failed to parse cached URLs', e);
+      }
+
+      const pathsToFetch: string[] = [];
+      const updatedUrlMap: Record<string, string> = {};
+
+      templatesData.forEach(t => {
+        const c = cached[t.id];
+        if (c && c.expires > now + 60000) { // Still valid for at least 1 minute
+          updatedUrlMap[t.id] = c.url;
+        } else {
+          pathsToFetch.push(t.file_path);
+        }
+      });
+
+      if (pathsToFetch.length > 0) {
+        const { data: signedData, error: sErr } = await supabase.storage.from('templates').createSignedUrls(pathsToFetch, 3600);
+        if (!sErr && signedData) {
+          signedData.forEach(item => {
+             if (item.signedUrl) {
+                const t = templatesData.find(tpl => tpl.file_path === item.path);
+                if (t) {
+                  updatedUrlMap[t.id] = item.signedUrl;
+                  cached[t.id] = { url: item.signedUrl, expires: now + 3540000 }; // 59 minutes
+                }
+             }
+          });
+          try { localStorage.setItem(CACHE_KEY, JSON.stringify(cached)); } catch(e) { console.warn('Cache full', e); }
+        }
+      }
+      setTemplateUrls(updatedUrlMap);
+    }
     setLoading(false);
   }, [supabase]);
 
@@ -49,27 +94,21 @@ export default function TemplatesPage() {
       if (uploadError) throw uploadError;
 
       const dims = await getFileDimensions(file);
-      const width = dims.width;
-      const height = dims.height;
-
       const { data: insertData, error: dbError } = await supabase.from('templates').insert({
         name: file.name.replace(/\.[^/.]+$/, ''),
         file_path: path, file_type: type,
-        width, height, user_id: user.id,
+        width: dims.width, height: dims.height, user_id: user.id,
       }).select().single();
       if (dbError) throw dbError;
       
-      if (insertData) {
-        router.push(`/dashboard/templates/${insertData.id}/configure`);
-      } else {
-        await load();
-      }
+      if (insertData) router.push(`/dashboard/templates/${insertData.id}/configure`);
+      else await load();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Upload failed');
     } finally {
       setUploading(false);
     }
-  }, [supabase, load]);
+  }, [supabase, load, router]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept:   { 'image/png': ['.png'], 'application/pdf': ['.pdf'] },
@@ -80,9 +119,7 @@ export default function TemplatesPage() {
     onDropRejected: (rejections) => {
       const errorObj = rejections[0]?.errors[0];
       let msg = errorObj?.message || 'File rejected';
-      if (errorObj?.code === 'file-too-large') {
-        msg = 'File is too large. Max size is 5 MB';
-      }
+      if (errorObj?.code === 'file-too-large') msg = 'File is too large. Max size is 5 MB';
       setError(msg);
     }
   });
@@ -91,7 +128,6 @@ export default function TemplatesPage() {
     if (!confirm(`Delete "${template.name}"? This cannot be undone.`)) return;
     await supabase.storage.from('templates').remove([template.file_path]);
     await supabase.from('templates').delete().eq('id', template.id);
-    await supabase.from('template_configs').delete().eq('template_id', template.id);
     await load();
   }, [supabase, load]);
 
@@ -124,11 +160,6 @@ export default function TemplatesPage() {
       if (file.type === 'application/pdf') URL.revokeObjectURL(url);
     }
   }
-
-  const getPublicUrl = useCallback((path: string) => {
-    const { data } = supabase.storage.from('templates').getPublicUrl(path);
-    return data.publicUrl;
-  }, [supabase]);
 
   return (
     <div className="p-6 lg:p-10 max-w-6xl mx-auto animate-fade-in">
@@ -193,7 +224,7 @@ export default function TemplatesPage() {
           {templates.map(t => (
             <div key={t.id} className="card group hover:shadow-medium transition-all duration-200">
               <div className="relative bg-ink-50 rounded-t-xl overflow-hidden h-44">
-                <TemplatePreview template={t} getPublicUrl={getPublicUrl} />
+                <TemplatePreview template={t} signedUrl={templateUrls[t.id]} />
               </div>
               <div className="p-4">
                 {renamingId === t.id ? (
@@ -238,12 +269,17 @@ export default function TemplatesPage() {
   );
 }
 
-function TemplatePreview({ template, getPublicUrl }: { template: Template, getPublicUrl: (p: string) => string }) {
-  const [url, setUrl] = useState<string | null>(template.file_type === 'png' ? getPublicUrl(template.file_path) : null);
-  const [loading, setLoading] = useState(template.file_type === 'pdf');
+function TemplatePreview({ template, signedUrl }: { template: Template, signedUrl?: string }) {
+  const [url, setUrl]     = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (template.file_type === 'pdf') {
+    if (!signedUrl) return;
+    
+    if (template.file_type === 'png') {
+      setUrl(signedUrl);
+      setLoading(false);
+    } else {
        const cacheKey = `thumb-pdf-${template.id}`;
        const cached = typeof window !== 'undefined' ? localStorage.getItem(cacheKey) : null;
        if (cached) {
@@ -253,30 +289,30 @@ function TemplatePreview({ template, getPublicUrl }: { template: Template, getPu
        }
 
        (async () => {
+         setLoading(true);
          try {
            const { loadPdfPageBitmap } = await import('@/lib/certGen');
-           const { bitmap } = await loadPdfPageBitmap(getPublicUrl(template.file_path));
+           const { bitmap } = await loadPdfPageBitmap(signedUrl);
            const canvas = document.createElement('canvas');
            canvas.width = bitmap.width; canvas.height = bitmap.height;
            const ctx = canvas.getContext('2d');
            if (ctx) ctx.drawImage(bitmap, 0, 0);
-           const dataUrl = canvas.toDataURL('image/jpeg', 0.5); // JPG at 0.5 is much smaller than PNG for thumbs
+           const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
            setUrl(dataUrl);
            try { localStorage.setItem(cacheKey, dataUrl); } catch(e) { console.warn('Cache full', e); }
          } catch (e) {
-           console.error(e);
+           console.error('PDF Preview failed:', e);
          } finally {
            setLoading(false);
          }
        })();
     }
-  }, [template, getPublicUrl]);
+  }, [template, signedUrl]);
 
-  if (loading) {
+  if (loading || (!url && signedUrl)) {
      return (
        <div className="w-full h-full flex flex-col items-center justify-center gap-2">
-         <div className="animate-spin w-5 h-5 border-2 border-ink-200 border-t-accent-gold rounded-full" />
-         <span className="text-[10px] text-ink-400 uppercase tracking-widest font-bold">Rendering</span>
+         <div className="animate-spin w-4 h-4 border-2 border-ink-100 border-t-accent-gold rounded-full" />
        </div>
      );
   }
@@ -284,12 +320,11 @@ function TemplatePreview({ template, getPublicUrl }: { template: Template, getPu
   if (!url) {
      return (
        <div className="w-full h-full flex flex-col items-center justify-center gap-2">
-         <FileImage size={32} className="text-ink-300" />
-         <span className="text-xs text-ink-400 font-medium">No Preview</span>
+         <FileImage size={24} className="text-ink-200" />
        </div>
      );
   }
 
   /* eslint-disable-next-line @next/next/no-img-element */
-  return <img src={url} alt={template.name} className="w-full h-full object-cover" />;
+  return <img src={url} alt={template.name} className="w-full h-full object-cover animate-fade-in" />;
 }
