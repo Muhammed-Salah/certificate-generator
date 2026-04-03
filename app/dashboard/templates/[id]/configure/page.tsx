@@ -3,10 +3,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import type { Template, TemplateConfig, TextField, RichTextField, FontRecord } from '@/types';
+import type { Template, TemplateConfig, TextField, RichTextField, CustomTextField, FontRecord } from '@/types';
 import {
   Save, ArrowLeft, Type, AlignLeft, AlignCenter, AlignRight,
-  ChevronDown, Palette, Info, Grid3X3, Magnet
+  ChevronDown, Palette, Info, Grid3X3, Magnet, PlusCircle, Trash2
 } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
 
@@ -29,7 +29,7 @@ declare global {
   }
 }
 
-type DragTarget = 'name' | 'description' | null;
+type DragTarget = string | null;
 
 export default function ConfigurePage() {
   const params   = useParams();
@@ -44,6 +44,8 @@ export default function ConfigurePage() {
   const [imgLoaded, setImgLoaded] = useState(false);
   const [imgNatW, setImgNatW]     = useState(1);
   const [imgNatH, setImgNatH]     = useState(1);
+  const [pdfRendering, setPdfRendering] = useState(false);
+  const [pdfDataUrl, setPdfDataUrl]     = useState<string | null>(null);
 
   const [nameField, setNameField] = useState<TextField>({
     x: 0.5, y: 0.55, font_family: 'Georgia', font_size: 48,
@@ -58,6 +60,9 @@ export default function ConfigurePage() {
   const [showDesc, setShowDesc]     = useState(false);
   const [showNameColor, setShowNameColor] = useState(false);
   const [showDescColor, setShowDescColor] = useState(false);
+
+  const [additionalFields, setAdditionalFields] = useState<CustomTextField[]>([]);
+  const [showCustomColor, setShowCustomColor] = useState<Record<string, boolean>>({});
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const imgRef    = useRef<HTMLImageElement>(null);
@@ -108,6 +113,7 @@ export default function ConfigurePage() {
       if (cfg) {
         if (cfg.name_field)        setNameField(cfg.name_field as TextField);
         if (cfg.description_field) { setDescField(cfg.description_field as RichTextField); setShowDesc(true); }
+        if (cfg.additional_fields) setAdditionalFields(cfg.additional_fields as CustomTextField[]);
       }
       if (fnts) setFonts(fnts as FontRecord[]);
     })();
@@ -133,6 +139,34 @@ export default function ConfigurePage() {
     return data.publicUrl;
   }, [template, supabase]);
 
+  /* ─── Render PDF to Canvas for background ─── */
+  useEffect(() => {
+    if (template?.file_type === 'pdf' && templateUrl) {
+      (async () => {
+        setPdfRendering(true);
+        try {
+          const { loadPdfPageBitmap, canvasToPngBlob } = await import('@/lib/certGen');
+          const { bitmap } = await loadPdfPageBitmap(templateUrl);
+          const canvas = document.createElement('canvas');
+          canvas.width = bitmap.width; canvas.height = bitmap.height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) ctx.drawImage(bitmap, 0, 0);
+          const blob = await canvasToPngBlob(canvas);
+          const url = URL.createObjectURL(blob);
+          setPdfDataUrl(url);
+          // Auto-measure for PDFs that were uploaded before the fix
+          setImgNatW(bitmap.width);
+          setImgNatH(bitmap.height);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          setPdfRendering(false);
+        }
+      })();
+    }
+    return () => { if (pdfDataUrl) URL.revokeObjectURL(pdfDataUrl); };
+  }, [template, templateUrl]);
+
   /* ─── Generic drag starter ─── */
   const startDrag = useCallback((e: React.MouseEvent, target: DragTarget, resize = false) => {
     e.stopPropagation();
@@ -143,12 +177,21 @@ export default function ConfigurePage() {
     const rect = canvasRef.current.getBoundingClientRect();
 
     if (resize) {
-      resizingDesc.current = true;
-      dragStart.current = {
-        mx: e.clientX, my: e.clientY,
-        fx: descField.x, fy: descField.y,
-        fw: descField.width, fh: descField.height,
-      };
+      let targetField: RichTextField | undefined;
+      // Re-use logic for dragging custom field bottom-right handle if custom fields become resizable. 
+      // Right now only description box has resizing.
+      if (target === 'description') {
+        targetField = descField;
+      }
+
+      if (targetField) {
+        resizingDesc.current = true;
+        dragStart.current = {
+          mx: e.clientX, my: e.clientY,
+          fx: targetField.x, fy: targetField.y,
+          fw: targetField.width, fh: targetField.height,
+        };
+      }
       const onMove = (ev: MouseEvent) => {
         if (!resizingDesc.current) return;
         const dw = (ev.clientX - dragStart.current.mx) / rect.width;
@@ -170,7 +213,13 @@ export default function ConfigurePage() {
     }
 
     dragging.current = target;
-    const field = target === 'name' ? nameField : descField;
+    const isCustom = target !== 'name' && target !== 'description';
+    const field = target === 'name' ? nameField : 
+                  target === 'description' ? descField : 
+                  additionalFields.find(f => f.id === target);
+                  
+    if (!field) return;
+
     dragStart.current = {
       mx: e.clientX, my: e.clientY,
       fx: field.x,   fy: field.y,
@@ -193,11 +242,15 @@ export default function ConfigurePage() {
         nx = Math.round(nx / step) * step;
         ny = Math.round(ny / step) * step;
       }
+      
       if (dragging.current === 'name') {
         setNameField(p => ({ ...p, x: nx, y: ny }));
         triggerLimitGuide();
-      } else {
+      } else if (dragging.current === 'description') {
         setDescField(p =>  ({ ...p, x: nx, y: ny }));
+      } else {
+        const tgt = dragging.current;
+        setAdditionalFields(p => p.map(f => f.id === tgt ? { ...f, x: nx, y: ny } : f));
       }
       window.__unsavedChanges = true;
     };
@@ -209,7 +262,7 @@ export default function ConfigurePage() {
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
-  }, [nameField, descField, snapToGrid, gridSize, showGrid]);
+  }, [nameField, descField, additionalFields, snapToGrid, gridSize, showGrid, selectedElement, triggerLimitGuide]);
 
   const toggleSelection = useCallback((e: React.MouseEvent, target: DragTarget) => {
     e.stopPropagation();
@@ -237,8 +290,10 @@ export default function ConfigurePage() {
         if (selectedElement === 'name') {
            setNameField(p => ({ ...p, x: Math.max(0, Math.min(1, p.x + dx)), y: Math.max(0, Math.min(1, p.y + dy)) }));
            triggerLimitGuide();
-        } else {
+        } else if (selectedElement === 'description') {
            setDescField(p => ({ ...p, x: Math.max(0, Math.min(1, p.x + dx)), y: Math.max(0, Math.min(1, p.y + dy)) }));
+        } else {
+           setAdditionalFields(p => p.map(f => f.id === selectedElement ? { ...f, x: Math.max(0, Math.min(1, f.x + dx)), y: Math.max(0, Math.min(1, f.y + dy)) } : f));
         }
         window.__unsavedChanges = true;
       }
@@ -247,6 +302,27 @@ export default function ConfigurePage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedElement, snapToGrid, gridSize]);
 
+  const handleAddCustomField = useCallback(() => {
+    setAdditionalFields(p => [
+      ...p,
+      {
+        id: crypto.randomUUID(),
+        label: `Custom ${p.length + 1}`,
+        content: `Sample ${p.length + 1}`,
+        x: 0.5, y: 0.8,
+        font_family: 'Georgia', font_size: 24, font_color: '#1a1612',
+        alignment: 'center', case_transform: 'none', max_width: 0.8, auto_size: true
+      }
+    ]);
+    window.__unsavedChanges = true;
+  }, []);
+
+  const handleDeleteCustomField = useCallback((targetId: string) => {
+    setAdditionalFields(p => p.filter(f => f.id !== targetId));
+    if (selectedElement === targetId) setSelectedElement(null);
+    window.__unsavedChanges = true;
+  }, [selectedElement]);
+
   /* ─── Save ─── */
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -254,6 +330,7 @@ export default function ConfigurePage() {
       template_id:       id,
       name_field:        nameField,
       description_field: showDesc ? descField : undefined,
+      additional_fields: additionalFields.length > 0 ? additionalFields : undefined,
       updated_at:        new Date().toISOString(),
     };
     const { error } = await supabase
@@ -265,12 +342,14 @@ export default function ConfigurePage() {
       window.__unsavedChanges = false;
       setTimeout(() => router.push('/dashboard/templates'), 500); 
     }
-  }, [id, nameField, descField, showDesc, supabase, router]);
+  }, [id, nameField, descField, showDesc, additionalFields, supabase, router]);
 
   const allFonts = useMemo(
     () => [...SYSTEM_FONTS, ...fonts.map(f => f.name)],
     [fonts],
   );
+
+  const [configTab, setConfigTab] = useState<'main' | 'custom'>('main');
 
   /* ─── Render overlay dimensions ─── */
   // These are in % of the rendered image, which matches what we stored (0-1 fractions)
@@ -285,85 +364,192 @@ export default function ConfigurePage() {
     <div className="flex flex-col lg:flex-row h-screen overflow-hidden animate-fade-in">
 
       {/* ─── Left panel ─── */}
-      <aside className="w-full lg:w-80 xl:w-96 flex-shrink-0 bg-white border-r border-ink-100 overflow-y-auto flex flex-col">
+      <aside className="w-full lg:w-80 xl:w-96 flex-shrink-0 bg-white border-r border-ink-100 overflow-hidden flex flex-col">
         <div className="p-5 border-b border-ink-100 flex items-center gap-3 flex-shrink-0">
           <button onClick={() => router.back()}
                   className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
             <ArrowLeft size={18}/>
           </button>
           <div className="min-w-0">
-            <h1 className="font-display text-lg text-ink-900 font-medium">Configure Template</h1>
-            <p className="text-xs text-ink-400 truncate">{template.name}</p>
+            <h1 className="font-display text-lg text-ink-900 font-medium tracking-tight">Configuration</h1>
+            <p className="text-[11px] text-ink-400 truncate uppercase tracking-widest">{template.name}</p>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5 space-y-6">
-          {/* Name field */}
-          <section>
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-4 h-4 rounded-full bg-blue-500 flex-shrink-0"/>
-              <h3 className="font-medium text-ink-800 text-sm">Name Field</h3>
-              <span className="ml-auto flex items-center gap-1 text-xs text-ink-400">
-                <Info size={11}/> Drag on canvas
+        {/* Tab Switcher */}
+        <div className="flex px-5 pt-4 border-b border-ink-100 flex-shrink-0">
+          <button
+            onClick={() => setConfigTab('main')}
+            className={`pb-3 text-xs font-bold uppercase tracking-widest border-b-2 transition-all mr-6 ${
+              configTab === 'main' ? 'border-accent-gold text-ink-900' : 'border-transparent text-ink-300 hover:text-ink-500'
+            }`}
+          >
+            Core Fields
+          </button>
+          <button
+            onClick={() => setConfigTab('custom')}
+            className={`pb-3 text-xs font-bold uppercase tracking-widest border-b-2 transition-all relative ${
+              configTab === 'custom' ? 'border-accent-gold text-ink-900' : 'border-transparent text-ink-300 hover:text-ink-500'
+            }`}
+          >
+            Custom Fields
+            {additionalFields.length > 0 && (
+              <span className="absolute -top-1 -right-3 w-4 h-4 bg-accent-gold text-ink-900 text-[9px] rounded-full flex items-center justify-center font-bold">
+                {additionalFields.length}
               </span>
-            </div>
-            <FieldControls
-              field={nameField}
-              onChange={(k, v) => { 
-                setNameField(p => ({ ...p, [k]: v } as TextField));
-                window.__unsavedChanges = true;
-                if (k === 'max_width' || k === 'x' || k === 'alignment') triggerLimitGuide();
-              }}
-              fonts={allFonts}
-              showColor={showNameColor}
-              onToggleColor={() => setShowNameColor(p => !p)}
-              onCloseColor={() => setShowNameColor(false)}
-              showCaseTransform
-              showAutoSize
-            />
-          </section>
+            )}
+          </button>
+        </div>
 
-          {/* Description field */}
-          <section>
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-amber-500 flex-shrink-0"/>
-                <h3 className="font-medium text-ink-800 text-sm">Description Field</h3>
-              </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-7 custom-scrollbar pb-10">
+          {configTab === 'main' ? (
+            <>
+              {/* Name field */}
+              <section className="animate-fade-in-up">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-1.5 h-6 bg-blue-500 rounded-full"/>
+                  <h3 className="font-display text-base text-ink-900">Recipient Name</h3>
+                </div>
+                <FieldControls
+                  field={nameField}
+                  onChange={(k, v) => { 
+                    setNameField(p => ({ ...p, [k]: v } as TextField));
+                    window.__unsavedChanges = true;
+                    if (k === 'max_width' || k === 'x' || k === 'alignment') triggerLimitGuide();
+                  }}
+                  fonts={allFonts}
+                  showColor={showNameColor}
+                  onToggleColor={() => setShowNameColor(p => !p)}
+                  onCloseColor={() => setShowNameColor(false)}
+                  showCaseTransform
+                  showAutoSize
+                />
+              </section>
+
+              {/* Description field */}
+              <section className="animate-fade-in-up pt-1" style={{ animationDelay: '0.1s' }}>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-1.5 h-6 bg-amber-500 rounded-full"/>
+                    <h3 className="font-display text-base text-ink-900">Description</h3>
+                  </div>
+                  <button
+                    onClick={() => { setShowDesc(p => !p); window.__unsavedChanges = true; }}
+                    className={`w-9 h-5 rounded-full transition-colors duration-200 relative flex-shrink-0 ${showDesc ? 'bg-accent-gold' : 'bg-ink-200'}`}>
+                    <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${showDesc ? 'translate-x-4' : 'translate-x-0.5'}`}/>
+                  </button>
+                </div>
+                {showDesc ? (
+                  <FieldControls
+                    field={descField}
+                    onChange={(k, v) => { setDescField(p => ({ ...p, [k]: v } as RichTextField)); window.__unsavedChanges = true; }}
+                    fonts={allFonts}
+                    showColor={showDescColor}
+                    onToggleColor={() => setShowDescColor(p => !p)}
+                    onCloseColor={() => setShowDescColor(false)}
+                  />
+                ) : (
+                  <div className="p-4 bg-ink-50 rounded-xl border border-ink-100 text-center">
+                    <p className="text-xs text-ink-400">Description field is currently hidden</p>
+                  </div>
+                )}
+              </section>
+            </>
+          ) : (
+            <div className="animate-fade-in-up space-y-7">
+              {/* Additional Custom Fields */}
+              {additionalFields.length === 0 ? (
+                <div className="py-12 bg-ink-50 rounded-2xl border border-ink-100 border-dashed text-center px-6">
+                  <div className="w-12 h-12 bg-ink-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                    <PlusCircle size={20} className="text-ink-300" />
+                  </div>
+                  <p className="text-sm text-ink-700 font-medium">No custom fields added</p>
+                  <p className="text-xs text-ink-400 mt-1">Use these for Certificate IDs, Dates, or unique marks.</p>
+                </div>
+              ) : (
+                additionalFields.map(field => (
+                  <section key={field.id} className="p-4 bg-white border border-ink-100 rounded-2xl shadow-sm relative group animation-fade-in">
+                    <div className="flex items-center gap-2 mb-5">
+                      <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"/>
+                      <input 
+                        value={field.label}
+                        onChange={e => {
+                           setAdditionalFields(p => p.map(f => f.id === field.id ? { ...f, label: e.target.value } : f));
+                           window.__unsavedChanges = true;
+                        }}
+                        className="font-display text-sm text-ink-900 bg-transparent border-b border-transparent hover:border-ink-200 focus:border-ink-400 focus:outline-none px-1 py-0.5 rounded transition-colors flex-1"
+                        placeholder="Field label"
+                      />
+                      
+                      <button 
+                        onClick={() => handleDeleteCustomField(field.id)}
+                        className="p-1.5 text-ink-300 hover:text-red-500 rounded-lg transition-colors hover:bg-red-50"
+                        aria-label="Delete field">
+                        <Trash2 size={16}/>
+                      </button>
+                    </div>
+
+                    <div className="mb-5">
+                      <label className="text-[10px] uppercase font-bold tracking-widest text-ink-400 mb-1.5 block">Preview Value</label>
+                      <input 
+                        value={field.content}
+                        onChange={e => {
+                           setAdditionalFields(p => p.map(f => f.id === field.id ? { ...f, content: e.target.value } : f));
+                           window.__unsavedChanges = true;
+                        }}
+                        className="input py-2 text-sm w-full font-medium"
+                        placeholder="Sample text..."
+                      />
+                    </div>
+
+                    <FieldControls
+                      field={field}
+                      onChange={(k, v) => { 
+                        setAdditionalFields(p => p.map(f => f.id === field.id ? { ...f, [k]: v } : f));
+                        window.__unsavedChanges = true;
+                      }}
+                      fonts={allFonts}
+                      showColor={showCustomColor[field.id] || false}
+                      onToggleColor={() => setShowCustomColor(p => ({ ...p, [field.id]: !p[field.id] }))}
+                      onCloseColor={() => setShowCustomColor(p => ({ ...p, [field.id]: false }))}
+                      showCaseTransform
+                      showAutoSize={false}
+                      showMaxWidth={false}
+                    />
+                  </section>
+                ))
+              )}
+
               <button
-                onClick={() => { setShowDesc(p => !p); window.__unsavedChanges = true; }}
-                className={`w-9 h-5 rounded-full transition-colors duration-200 relative flex-shrink-0 ${showDesc ? 'bg-accent-gold' : 'bg-ink-200'}`}>
-                <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${showDesc ? 'translate-x-4' : 'translate-x-0.5'}`}/>
+                onClick={handleAddCustomField}
+                className="w-full flex items-center justify-center gap-2 p-4 text-xs font-bold uppercase tracking-widest text-ink-700 bg-white hover:bg-ink-950 hover:text-white border-2 border-ink-950 rounded-2xl transition-all shadow-md active:scale-[0.98]"
+              >
+                <PlusCircle size={14}/> Add New Custom Field
               </button>
             </div>
-            {showDesc && (
-              <FieldControls
-                field={descField}
-                onChange={(k, v) => { setDescField(p => ({ ...p, [k]: v } as RichTextField)); window.__unsavedChanges = true; }}
-                fonts={allFonts}
-                showColor={showDescColor}
-                onToggleColor={() => setShowDescColor(p => !p)}
-                onCloseColor={() => setShowDescColor(false)}
-              />
-            )}
-          </section>
+          )}
 
-          <div className="p-3 bg-parchment-50 rounded-lg border border-parchment-300 text-xs text-ink-500 leading-relaxed">
-            <strong className="text-ink-700">Tip:</strong> Drag the coloured dots on the canvas to reposition fields. Resize the description box by dragging its bottom-right corner.
+          <div className="p-4 bg-parchment-50 rounded-2xl border border-parchment-200 text-xs text-ink-500 leading-relaxed shadow-sm">
+            <div className="flex gap-2.5">
+               <Info size={14} className="text-accent-gold flex-shrink-0 mt-0.5" />
+               <p>
+                 <strong className="text-ink-700 font-bold">Pro Tip:</strong> Drag the dots on the certificate preview to reposition them instantly. You can also use arrow keys for fine-tuning.
+               </p>
+            </div>
           </div>
         </div>
 
-        <div className="p-5 border-t border-ink-100 flex-shrink-0">
+        <div className="p-5 border-t border-ink-100 flex-shrink-0 bg-white">
           <button onClick={handleSave} disabled={saving}
-                  className={`w-full btn-primary justify-center py-3 transition-colors ${saved ? '!bg-green-700' : ''}`}>
+                  className={`w-full btn-gold justify-center py-3.5 transition-all shadow-lg active:scale-[0.98] ${saved ? '!bg-green-600 !text-white' : ''}`}>
             {saving
               ? <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                 </svg> Saving…</>
               : saved
-              ? <>✓ Saved!</>
-              : <><Save size={16}/> Save Configuration</>
+              ? <>✓ Configuration Saved</>
+              : <><Save size={16}/> Save & Return</>
             }
           </button>
         </div>
@@ -376,28 +562,33 @@ export default function ConfigurePage() {
         <div className="relative canvas-shadow rounded-lg overflow-hidden select-none"
              style={{ maxWidth: '100%', maxHeight: '85vh', display: 'inline-block' }}>
 
-          {template.file_type === 'png' ? (
+          {pdfRendering ? (
+            <div className="w-[800px] h-[566px] bg-white flex flex-col items-center justify-center gap-4 border border-ink-100 rounded-lg shadow-sm">
+               <div className="animate-spin w-10 h-10 border-4 border-ink-100 border-t-accent-gold rounded-full" />
+               <div className="text-center">
+                 <p className="text-sm text-ink-800 font-bold uppercase tracking-widest">Rendering PDF</p>
+                 <p className="text-[10px] text-ink-400 mt-1 uppercase tracking-tight">Sharpening edges and measuring proportions...</p>
+               </div>
+            </div>
+          ) : (
             /* eslint-disable-next-line @next/next/no-img-element */
             <img
               ref={imgRef}
-              src={templateUrl}
+              src={template.file_type === 'pdf' ? (pdfDataUrl || '') : templateUrl}
               alt={template.name}
               className="block max-w-full"
               style={{ maxHeight: '85vh', objectFit: 'contain' }}
               onLoad={e => {
                 const img = e.currentTarget;
                 setImgLoaded(true);
-                setImgNatW(img.naturalWidth);
-                setImgNatH(img.naturalHeight);
+                // For PNGs we trust the natural dimensions
+                if (template.file_type === 'png') {
+                  setImgNatW(img.naturalWidth);
+                  setImgNatH(img.naturalHeight);
+                }
               }}
               draggable={false}
             />
-          ) : (
-            <div ref={imgRef as React.RefObject<HTMLDivElement>}
-                 className="w-[800px] h-[566px] bg-white flex items-center justify-center"
-                 onLoad={() => setImgLoaded(true)}>
-              <p className="text-ink-400 text-sm">PDF template — field positions shown as overlays</p>
-            </div>
           )}
           
           {/* Max width limits guide */}
@@ -516,6 +707,53 @@ export default function ConfigurePage() {
                   </div>
                 </div>
               )}
+
+              {/* Additional Custom Fields */}
+              {additionalFields.map((field) => (
+                <div
+                  key={field.id}
+                  className={`absolute cursor-move group z-10 transition-shadow ${selectedElement === field.id ? 'ring-2 ring-accent-gold ring-offset-2' : ''}`}
+                  style={{
+                    left:      `${field.x * 100}%`,
+                    top:       `${field.y * 100}%`,
+                    transform: 'translate(-50%, -50%)',
+                  }}
+                  onMouseDown={e => {
+                    if (e.button === 0) startDrag(e, field.id);
+                  }}
+                  onClick={e => toggleSelection(e, field.id)}>
+                  
+                  <div className={`absolute -top-6 left-1/2 -translate-x-1/2 bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded whitespace-nowrap
+                                  transition-opacity pointer-events-none z-20 ${selectedElement === field.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                    {field.label}
+                  </div>
+                  
+                  <div className={`w-3 h-3 rounded-full bg-emerald-500 border-2 border-white shadow-md transition-transform ${selectedElement === field.id ? 'scale-125' : 'hover:scale-125'}`}/>
+                  
+                  {/* Ghost text */}
+                  <div className="absolute top-1/2 -translate-y-1/2 pointer-events-none"
+                       style={{
+                         left:      field.alignment === 'left'  ? '8px' :
+                                    field.alignment === 'right' ? 'auto' : '50%',
+                         right:     field.alignment === 'right' ? '8px' : 'auto',
+                         transform: `translateY(-50%)${field.alignment === 'center' ? ' translateX(-50%)' : ''}`,
+                         width: `${field.max_width * (imgRef.current?.clientWidth ?? 800)}px`,
+                         textAlign: field.alignment,
+                       }}>
+                    <span style={{
+                      fontFamily:  field.font_family,
+                      fontSize:    field.font_size * (imgRef.current ? imgRef.current.clientWidth / imgNatW : 1),
+                      color:       field.font_color,
+                      textShadow:  '0 0 6px rgba(255,255,255,0.9)',
+                      whiteSpace:  'nowrap',
+                      fontVariant: field.case_transform === 'small-caps' ? 'small-caps' : 'normal',
+                      textTransform: field.case_transform !== 'small-caps' && field.case_transform !== 'none' ? (field.case_transform as any) : 'none',
+                    }}>
+                      {field.content || field.label}
+                    </span>
+                  </div>
+                </div>
+              ))}
             </>
           )}
         </div>
@@ -579,7 +817,7 @@ function NumericInput({ value, min, onChange, className }: { value: number; min:
 /* ─── FieldControls sub-component ─── */
 function FieldControls({
   field, onChange, fonts, showColor, onToggleColor, onCloseColor,
-  showCaseTransform = false, showAutoSize = false,
+  showCaseTransform = false, showAutoSize = false, showMaxWidth = true,
 }: {
   field: TextField | RichTextField;
   onChange: (key: string, value: unknown) => void;
@@ -589,6 +827,7 @@ function FieldControls({
   onCloseColor: () => void;
   showCaseTransform?: boolean;
   showAutoSize?: boolean;
+  showMaxWidth?: boolean;
 }) {
   return (
     <div className="space-y-3.5">
@@ -689,7 +928,7 @@ function FieldControls({
       )}
 
       {/* Max width */}
-      {'max_width' in field && (
+      {showMaxWidth && 'max_width' in field && (
         <div>
           <label className="label">Max Width — <span className="text-ink-500 font-normal normal-case">{Math.round((field as TextField).max_width * 100)}% of template width</span></label>
           <input type="range" min={10} max={100}
@@ -707,8 +946,13 @@ function FieldControls({
             contentEditable suppressContentEditableWarning
             className="rich-editor input rounded-lg p-3 min-h-[70px]"
             data-placeholder="Enter default description text…"
-            style={{ fontFamily: field.font_family, fontSize: Math.min((field as RichTextField).font_size * 0.7, 16) }}
+            style={{ fontFamily: field.font_family, fontSize: '14px' }}
             onBlur={e => onChange('content', (e.target as HTMLDivElement).innerHTML)}
+            onPaste={e => {
+              e.preventDefault();
+              const text = e.clipboardData.getData('text/plain');
+              document.execCommand('insertText', false, text);
+            }}
             dangerouslySetInnerHTML={{ __html: (field as RichTextField).content }}
           />
           <div className="flex gap-1 mt-1.5">

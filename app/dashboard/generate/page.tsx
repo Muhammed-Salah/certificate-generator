@@ -8,7 +8,7 @@ import {
   canvasToPngBlob, canvasToPdfBlob, canvasesToMergedPdf, blobsToZip, triggerDownload,
 } from '@/lib/certGen';
 import {
-  Award, ChevronRight, Upload, Eye, Download, FileText,
+  Award, ChevronRight, Upload, Eye, Download, FileText, FileImage,
   Users, Trash2, ChevronLeft, PackageOpen, Layers, X,
 } from 'lucide-react';
 import Papa from 'papaparse';
@@ -31,7 +31,7 @@ export default function GeneratePage() {
   const [config, setConfig]     = useState<TemplateConfig | null>(null);
 
   /* ─── Names ─── */
-  const [names, setNames]             = useState<string[]>(['']);
+  const [names, setNames]             = useState<Record<string, string>[]>([{ Name: '' }]);
   const [descOverride, setDescOverride] = useState('');
 
   /* ─── Output ─── */
@@ -49,6 +49,7 @@ export default function GeneratePage() {
   /* ─── Generation ─── */
   const [generating, setGenerating]   = useState(false);
   const [genProgress, setGenProgress] = useState({ done: 0, total: 0 });
+  const [isGenerated, setIsGenerated] = useState(false);
   const [error, setError]             = useState('');
 
   /* ─── Bitmap cache ─── */
@@ -96,6 +97,20 @@ export default function GeneratePage() {
   /* ─── Bitmap loader (cached) ─── */
   const getBitmap = useCallback(async (t: Template): Promise<ImageBitmap> => {
     if (bitmapTplId.current === t.id && bitmapRef.current) return bitmapRef.current;
+    
+    // Check localStorage cache first for PDFs (instant load)
+    if (t.file_type === 'pdf') {
+      const cached = typeof window !== 'undefined' ? localStorage.getItem(`thumb-pdf-${t.id}`) : null;
+      if (cached) {
+        const res = await fetch(cached);
+        const blob = await res.blob();
+        const bitmap = await createImageBitmap(blob);
+        bitmapRef.current = bitmap;
+        bitmapTplId.current = t.id;
+        return bitmap;
+      }
+    }
+
     const { data } = supabase.storage.from('templates').getPublicUrl(t.file_path);
     let bitmap: ImageBitmap;
     if (t.file_type === 'pdf') {
@@ -112,14 +127,26 @@ export default function GeneratePage() {
   /* ─── Render preview ─── */
   const renderPreview = useCallback(async () => {
     if (!selected || !config) return;
-    const name = names[previewIdx]?.trim();
-    if (!name) return;
-    setPreviewLoading(true);
+    const row = names[previewIdx] || { Name: '' };
+    const name = row?.Name?.trim() || 'Recipient Name';
+    
+    // Only show loader if we don't have the bitmap cached yet
+    const needsBitmap = bitmapTplId.current !== selected.id || !bitmapRef.current;
+    if (needsBitmap) setPreviewLoading(true);
+
     try {
       const bitmap = await getBitmap(selected);
+      const customFieldsData: Record<string, string> = {};
+      if (config.additional_fields) {
+        for (const f of config.additional_fields) {
+          customFieldsData[f.id] = row[f.label]?.trim() || f.content || f.label;
+        }
+      }
+
       const canvas = await renderCertificate({
         name,
         descriptionHtml: descOverride || config.description_field?.content || '',
+        customFieldsData,
         template: selected, config,
         templateImageBitmap: bitmap,
         scale: 1,
@@ -127,6 +154,7 @@ export default function GeneratePage() {
       setPreviewDataUrl(canvas.toDataURL('image/png'));
     } catch (e) {
       console.error('Preview error:', e);
+      setPreviewDataUrl('');
     }
     setPreviewLoading(false);
   }, [selected, config, names, previewIdx, descOverride, getBitmap]);
@@ -135,13 +163,17 @@ export default function GeneratePage() {
     if (step === 'names') renderPreview();
   }, [step, previewIdx, renderPreview, names, descOverride]);
 
-  /* ─── Unsaved changes handle ─── */
   useEffect(() => {
-    const hasData = (names.length > 1 || names[0].trim() !== '') || !!descOverride;
+    const hasData = ((names.length > 1 || names[0].Name?.trim() !== '') || !!descOverride) && !isGenerated;
     window.__unsavedChanges = hasData;
     const h = (e: BeforeUnloadEvent) => { if (window.__unsavedChanges) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', h);
     return () => { window.removeEventListener('beforeunload', h); window.__unsavedChanges = false; };
+  }, [names, descOverride, isGenerated]);
+
+  /* ─── Reset generation state on change ─── */
+  useEffect(() => {
+    setIsGenerated(false);
   }, [names, descOverride]);
 
   /* ─── Select template ─── */
@@ -159,44 +191,92 @@ export default function GeneratePage() {
   }, [supabase]);
 
   /* ─── CSV upload ─── */
+  const downloadTemplateCsv = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const cols = ['Name', ...(config?.additional_fields?.map(f => f.label) || [])];
+    const header = cols.join(',');
+    const sample = cols.map(c => c === 'Name' ? 'John Doe' : `Sample ${c}`).join(',');
+    const blob = new Blob([header + '\n' + sample], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'certificate-template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [config]);
+
   const handleCsvUpload = useCallback((file: File) => {
-    Papa.parse<string[]>(file, {
+    Papa.parse<Record<string, string>>(file, {
+      header: true,
+      skipEmptyLines: true,
       complete: res => {
-        const parsed = res.data.flat().map(s => String(s).trim()).filter(Boolean);
-        if (parsed.length > 0) setNames(parsed);
+        const nameKey = res.meta.fields?.find(f => f.toLowerCase() === 'name');
+        if (!nameKey) {
+            alert('Your CSV must contain a "Name" column header.');
+            return;
+        }
+        
+        const parsed = res.data.map(row => {
+           const out: Record<string, string> = { Name: String(row[nameKey] || '') };
+           for (const f of config?.additional_fields || []) {
+               const col = res.meta.fields?.find(m => m.toLowerCase() === f.label.toLowerCase());
+               if (col) out[f.label] = String(row[col] || '');
+           }
+           return out;
+        }).filter(r => r.Name && String(r.Name).trim());
+        
+        if (parsed.length > 0) {
+          setNames(parsed);
+          setPreviewIdx(0);
+        } else {
+            alert('No valid names found in the uploaded file.');
+        }
       },
     });
-  }, []);
+  }, [config]);
 
   /* ─── Generate ─── */
   const handleGenerate = useCallback(async () => {
     if (!selected || !config) return;
     setGenerating(true); setError('');
-    const valid = names.filter(n => n.trim());
+    const valid = names.filter(n => n.Name?.trim());
     setGenProgress({ done: 0, total: valid.length });
 
     try {
       const bitmap = await getBitmap(selected);
 
       if (valid.length === 1) {
+        const customFieldsData: Record<string, string> = {};
+        if (config.additional_fields) {
+          for (const f of config.additional_fields) { customFieldsData[f.id] = valid[0][f.label] || ''; }
+        }
+
         const canvas = await renderCertificate({
-          name: valid[0], descriptionHtml: descOverride,
+          name: valid[0].Name, descriptionHtml: descOverride,
+          customFieldsData,
           template: selected, config, templateImageBitmap: bitmap, scale: 1,
         });
-        const safeName = valid[0].replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+        const safeName = valid[0].Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
         if (outFormat === 'png') {
           triggerDownload(await canvasToPngBlob(canvas), `${safeName}.png`);
         } else {
-          triggerDownload(await canvasToPdfBlob(canvas, valid[0]), `${safeName}.pdf`);
+          triggerDownload(await canvasToPdfBlob(canvas, valid[0].Name), `${safeName}.pdf`);
         }
         setGenProgress({ done: 1, total: 1 });
+        setIsGenerated(true);
       } else {
         const canvases: HTMLCanvasElement[] = [];
         const entries:  { name: string; blob: Blob }[] = [];
 
         for (let i = 0; i < valid.length; i++) {
+          const customFieldsData: Record<string, string> = {};
+          if (config.additional_fields) {
+            for (const f of config.additional_fields) { customFieldsData[f.id] = valid[i][f.label] || ''; }
+          }
           const canvas = await renderCertificate({
-            name: valid[i], descriptionHtml: descOverride,
+            name: valid[i].Name, descriptionHtml: descOverride,
+            customFieldsData,
             template: selected, config, templateImageBitmap: bitmap, scale: 1,
           });
           canvases.push(canvas);
@@ -204,8 +284,8 @@ export default function GeneratePage() {
           if (bulkFmt === 'zip') {
             const blob = outFormat === 'png'
               ? await canvasToPngBlob(canvas)
-              : await canvasToPdfBlob(canvas, valid[i]);
-            const safeName = valid[i].replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+              : await canvasToPdfBlob(canvas, valid[i].Name);
+            const safeName = valid[i].Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
             entries.push({ name: `${safeName}.${outFormat}`, blob });
           }
           setGenProgress({ done: i + 1, total: valid.length });
@@ -217,6 +297,7 @@ export default function GeneratePage() {
         } else {
           triggerDownload(await canvasesToMergedPdf(canvases), 'certificates-merged.pdf');
         }
+        setIsGenerated(true);
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Generation failed. Please try again.');
@@ -226,7 +307,7 @@ export default function GeneratePage() {
   }, [selected, config, names, outFormat, bulkFmt, descOverride, getBitmap]);
 
   /* ─── Helpers ─── */
-  const validNames = useMemo(() => names.filter(n => n.trim()), [names]);
+  const validNames = useMemo(() => names.filter(n => n.Name?.trim()), [names]);
 
   const getThumb = useCallback((t: Template) => {
     if (t.file_type !== 'png') return null;
@@ -309,11 +390,7 @@ export default function GeneratePage() {
                             isSel ? 'ring-2 ring-accent-gold border-accent-gold/50' : ''
                           }`}>
                     <div className="h-36 bg-ink-50 relative">
-                      {thumb
-                        /* eslint-disable-next-line @next/next/no-img-element */
-                        ? <img src={thumb} alt={t.name} className="w-full h-full object-cover"/>
-                        : <div className="w-full h-full flex items-center justify-center"><FileText size={28} className="text-ink-300"/></div>
-                      }
+                      <TemplatePreview template={t} getPublicUrl={(p) => supabase.storage.from('templates').getPublicUrl(p).data.publicUrl} />
                       {isSel && (
                         <div className="absolute inset-0 bg-accent-gold/20 flex items-center justify-center">
                           <div className="w-8 h-8 rounded-full bg-accent-gold flex items-center justify-center">
@@ -366,48 +443,78 @@ export default function GeneratePage() {
                 </div>
                 <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                   {names.map((n, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <input
-                        ref={el => { if (focusNew && i === names.length - 1 && el && document.activeElement !== el) { el.focus(); setFocusNew(false); } }}
-                        className="input flex-1 py-2"
-                        placeholder={`Name ${i + 1}`}
-                        value={n}
-                        onChange={e => {
-                          const next = [...names];
-                          next[i] = e.target.value;
-                          setNames(next);
-                        }}
-                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setNames(p => [...p, '']); setFocusNew(true); } }}
-                      />
-                      {names.length > 1 && (
-                        <button onClick={() => {
-                          const next = names.filter((_, j) => j !== i);
-                          setNames(next);
-                          setPreviewIdx(p => Math.min(p, next.length - 1));
-                        }} className="p-1.5 text-ink-300 hover:text-red-500 rounded transition-colors">
-                          <Trash2 size={14}/>
-                        </button>
+                    <div key={i} className="flex flex-col gap-2 p-3 bg-ink-50 rounded-lg border border-ink-100">
+                      <div className="flex items-center gap-2">
+                        <input
+                          ref={el => { if (focusNew && i === names.length - 1 && el && document.activeElement !== el) { el.focus(); setFocusNew(false); } }}
+                          className="input flex-1 py-1.5 text-sm"
+                          placeholder="Name (Required)"
+                          value={n.Name || ''}
+                          onChange={e => {
+                            const next = [...names];
+                            next[i] = { ...next[i], Name: e.target.value };
+                            setNames(next);
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setNames(p => [...p, { Name: '' }]); setFocusNew(true); } }}
+                        />
+                        {names.length > 1 && (
+                          <button onClick={() => {
+                            const next = names.filter((_, j) => j !== i);
+                            setNames(next);
+                            setPreviewIdx(p => Math.min(p, next.length - 1));
+                          }} className="p-1.5 text-ink-300 hover:text-red-500 rounded transition-colors bg-white hover:bg-red-50 focus:outline-none">
+                            <Trash2 size={14}/>
+                          </button>
+                        )}
+                      </div>
+                      
+                      {config?.additional_fields && config.additional_fields.length > 0 && (
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                           {config.additional_fields.map(f => (
+                             <input 
+                               key={f.id}
+                               className="input py-1.5 text-xs bg-white"
+                               placeholder={f.label}
+                               value={n[f.label] || ''}
+                               onChange={e => {
+                                 const next = [...names];
+                                 next[i] = { ...next[i], [f.label]: e.target.value };
+                                 setNames(next);
+                               }}
+                             />
+                           ))}
+                        </div>
                       )}
                     </div>
                   ))}
                 </div>
-                <button onClick={() => { setNames(p => [...p, '']); setFocusNew(true); }}
-                        className="mt-3 text-sm text-ink-500 hover:text-ink-800 transition-colors">
-                  + Add another name
+                <button onClick={() => { setNames(p => [...p, { Name: '' }]); setFocusNew(true); }}
+                        className="mt-3 text-sm text-ink-500 hover:text-ink-800 transition-colors focus:outline-none">
+                  + Add another recipient
                 </button>
               </div>
 
               {/* CSV upload */}
-              <div className="card p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Upload size={16} className="text-ink-500"/>
-                  <h3 className="font-medium text-ink-700 text-sm">CSV Upload (Bulk)</h3>
+              <div className="card p-5 relative overflow-hidden">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Upload size={16} className="text-ink-500"/>
+                    <h3 className="font-medium text-ink-700 text-sm">CSV Upload (Bulk)</h3>
+                  </div>
+                  <button type="button" onClick={downloadTemplateCsv} className="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors bg-blue-50 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg">
+                    Download Template
+                  </button>
                 </div>
                 <label className="block border-2 border-dashed border-ink-200 rounded-xl p-4 text-center cursor-pointer
                                  hover:border-ink-300 hover:bg-parchment-50 transition-all duration-200">
                   <Upload size={20} className="text-ink-400 mx-auto mb-2"/>
                   <p className="text-sm text-ink-600 font-medium">Drop CSV or click to browse</p>
-                  <p className="text-xs text-ink-400 mt-1">One name per row</p>
+                  <div className="text-xs text-ink-400 mt-2 flex flex-wrap items-center justify-center gap-1">
+                    Columns required: <span className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">Name</span>
+                    {config?.additional_fields?.map(f => (
+                       <span key={f.id} className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">{f.label}</span>
+                    ))}
+                  </div>
                   <input type="file" accept=".csv" className="hidden"
                          onChange={e => { if (e.target.files?.[0]) handleCsvUpload(e.target.files[0]); }}/>
                 </label>
@@ -427,8 +534,13 @@ export default function GeneratePage() {
                     contentEditable suppressContentEditableWarning
                     className="rich-editor input rounded-lg p-3 min-h-[60px]"
                     data-placeholder="Start typing..."
-                    style={{ fontFamily: config.description_field.font_family, fontSize: Math.min(config.description_field.font_size * 0.7, 16) }}
+                    style={{ fontFamily: config.description_field.font_family, fontSize: '14px' }}
                     onBlur={e => setDescOverride((e.target as HTMLDivElement).innerHTML)}
+                    onPaste={e => {
+                      e.preventDefault();
+                      const text = e.clipboardData.getData('text/plain');
+                      document.execCommand('insertText', false, text);
+                    }}
                     dangerouslySetInnerHTML={{ __html: descOverride || '' }}
                   />
                   <div className="flex gap-1 mt-1.5">
@@ -589,4 +701,59 @@ export default function GeneratePage() {
       )}
     </div>
   );
+}
+
+function TemplatePreview({ template, getPublicUrl }: { template: Template, getPublicUrl: (p: string) => string }) {
+  const [url, setUrl] = useState<string | null>(template.file_type === 'png' ? getPublicUrl(template.file_path) : null);
+  const [loading, setLoading] = useState(template.file_type === 'pdf');
+
+  useEffect(() => {
+    if (template.file_type === 'pdf') {
+       const cacheKey = `thumb-pdf-${template.id}`;
+       const cached = typeof window !== 'undefined' ? localStorage.getItem(cacheKey) : null;
+       if (cached) {
+         setUrl(cached);
+         setLoading(false);
+         return;
+       }
+
+       (async () => {
+         try {
+           const { loadPdfPageBitmap } = await import('@/lib/certGen');
+           const { bitmap } = await loadPdfPageBitmap(getPublicUrl(template.file_path));
+           const canvas = document.createElement('canvas');
+           canvas.width = bitmap.width; canvas.height = bitmap.height;
+           const ctx = canvas.getContext('2d');
+           if (ctx) ctx.drawImage(bitmap, 0, 0);
+           const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
+           setUrl(dataUrl);
+           try { localStorage.setItem(cacheKey, dataUrl); } catch(e) { console.warn('Cache full', e); }
+         } catch (e) {
+           console.error(e);
+         } finally {
+           setLoading(false);
+         }
+       })();
+    }
+  }, [template, getPublicUrl]);
+
+  if (loading) {
+     return (
+       <div className="w-full h-full flex flex-col items-center justify-center gap-2">
+         <div className="animate-spin w-5 h-5 border-2 border-ink-100 border-t-accent-gold rounded-full" />
+         <span className="text-[10px] text-ink-400 uppercase tracking-widest font-bold">Rendering</span>
+       </div>
+     );
+  }
+
+  if (!url) {
+     return (
+       <div className="w-full h-full flex flex-col items-center justify-center gap-2">
+         <FileImage size={24} className="text-ink-300" />
+       </div>
+     );
+  }
+
+  /* eslint-disable-next-line @next/next/no-img-element */
+  return <img src={url} alt={template.name} className="w-full h-full object-cover" />;
 }

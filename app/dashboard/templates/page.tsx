@@ -37,7 +37,7 @@ export default function TemplatesPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      if (file.size > 10 * 1024 * 1024) throw new Error('File size exceeds 10MB limit');
+      if (file.size > 5 * 1024 * 1024) throw new Error('File size exceeds 5MB limit');
 
       const ext      = file.name.split('.').pop()?.toLowerCase();
       const type     = ext === 'pdf' ? 'pdf' : 'png';
@@ -48,11 +48,9 @@ export default function TemplatesPage() {
         .from('templates').upload(path, file, { cacheControl: '3600', upsert: false });
       if (uploadError) throw uploadError;
 
-      let width = 1920, height = 1080;
-      if (type === 'png') {
-        const dims = await getImageDimensions(file);
-        width = dims.width; height = dims.height;
-      }
+      const dims = await getFileDimensions(file);
+      const width = dims.width;
+      const height = dims.height;
 
       const { data: insertData, error: dbError } = await supabase.from('templates').insert({
         name: file.name.replace(/\.[^/.]+$/, ''),
@@ -77,10 +75,14 @@ export default function TemplatesPage() {
     accept:   { 'image/png': ['.png'], 'application/pdf': ['.pdf'] },
     maxFiles: 1,
     multiple: false,
-    maxSize:  10485760, // 10MB
+    maxSize:  5242880, // 5MB
     onDrop:   handleUpload,
     onDropRejected: (rejections) => {
-      const msg = rejections[0]?.errors[0]?.message || 'File rejected';
+      const errorObj = rejections[0]?.errors[0];
+      let msg = errorObj?.message || 'File rejected';
+      if (errorObj?.code === 'file-too-large') {
+        msg = 'File is too large. Max size is 5 MB';
+      }
       setError(msg);
     }
   });
@@ -100,14 +102,27 @@ export default function TemplatesPage() {
     await load();
   }, [renameValue, supabase, load]);
 
-  function getImageDimensions(file: File): Promise<{ width: number; height: number }> {
-    return new Promise(res => {
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-      img.onload  = () => { res({ width: img.naturalWidth, height: img.naturalHeight }); URL.revokeObjectURL(url); };
-      img.onerror = () => { res({ width: 1920, height: 1080 }); URL.revokeObjectURL(url); };
-      img.src = url;
-    });
+  async function getFileDimensions(file: File): Promise<{ width: number; height: number }> {
+    const url = URL.createObjectURL(file);
+    try {
+      if (file.type === 'application/pdf') {
+        const { loadPdfPageBitmap } = await import('@/lib/certGen');
+        const { width, height } = await loadPdfPageBitmap(url);
+        return { width, height };
+      } else {
+        return new Promise(res => {
+          const img = new Image();
+          img.onload  = () => { res({ width: img.naturalWidth, height: img.naturalHeight }); URL.revokeObjectURL(url); };
+          img.onerror = () => { res({ width: 1920, height: 1080 }); URL.revokeObjectURL(url); };
+          img.src = url;
+        });
+      }
+    } catch (e) {
+      console.error(e);
+      return { width: 1920, height: 1080 };
+    } finally {
+      if (file.type === 'application/pdf') URL.revokeObjectURL(url);
+    }
   }
 
   const getPublicUrl = useCallback((path: string) => {
@@ -151,7 +166,7 @@ export default function TemplatesPage() {
             <p className="text-ink-700 font-medium mb-1">
               {isDragActive ? 'Drop your template here' : 'Drop template here or click to browse'}
             </p>
-            <p className="text-ink-400 text-sm">PNG (max resolution) or PDF · Max 50 MB</p>
+            <p className="text-ink-400 text-sm">PNG (max resolution) or PDF · Max 5 MB</p>
           </>
         )}
       </div>
@@ -178,15 +193,7 @@ export default function TemplatesPage() {
           {templates.map(t => (
             <div key={t.id} className="card group hover:shadow-medium transition-all duration-200">
               <div className="relative bg-ink-50 rounded-t-xl overflow-hidden h-44">
-                {t.file_type === 'png' ? (
-                  /* eslint-disable-next-line @next/next/no-img-element */
-                  <img src={getPublicUrl(t.file_path)} alt={t.name} className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full flex flex-col items-center justify-center gap-2">
-                    <FileImage size={32} className="text-ink-300" />
-                    <span className="text-xs text-ink-400 font-medium">PDF Template</span>
-                  </div>
-                )}
+                <TemplatePreview template={t} getPublicUrl={getPublicUrl} />
               </div>
               <div className="p-4">
                 {renamingId === t.id ? (
@@ -229,4 +236,60 @@ export default function TemplatesPage() {
       )}
     </div>
   );
+}
+
+function TemplatePreview({ template, getPublicUrl }: { template: Template, getPublicUrl: (p: string) => string }) {
+  const [url, setUrl] = useState<string | null>(template.file_type === 'png' ? getPublicUrl(template.file_path) : null);
+  const [loading, setLoading] = useState(template.file_type === 'pdf');
+
+  useEffect(() => {
+    if (template.file_type === 'pdf') {
+       const cacheKey = `thumb-pdf-${template.id}`;
+       const cached = typeof window !== 'undefined' ? localStorage.getItem(cacheKey) : null;
+       if (cached) {
+         setUrl(cached);
+         setLoading(false);
+         return;
+       }
+
+       (async () => {
+         try {
+           const { loadPdfPageBitmap } = await import('@/lib/certGen');
+           const { bitmap } = await loadPdfPageBitmap(getPublicUrl(template.file_path));
+           const canvas = document.createElement('canvas');
+           canvas.width = bitmap.width; canvas.height = bitmap.height;
+           const ctx = canvas.getContext('2d');
+           if (ctx) ctx.drawImage(bitmap, 0, 0);
+           const dataUrl = canvas.toDataURL('image/jpeg', 0.5); // JPG at 0.5 is much smaller than PNG for thumbs
+           setUrl(dataUrl);
+           try { localStorage.setItem(cacheKey, dataUrl); } catch(e) { console.warn('Cache full', e); }
+         } catch (e) {
+           console.error(e);
+         } finally {
+           setLoading(false);
+         }
+       })();
+    }
+  }, [template, getPublicUrl]);
+
+  if (loading) {
+     return (
+       <div className="w-full h-full flex flex-col items-center justify-center gap-2">
+         <div className="animate-spin w-5 h-5 border-2 border-ink-200 border-t-accent-gold rounded-full" />
+         <span className="text-[10px] text-ink-400 uppercase tracking-widest font-bold">Rendering</span>
+       </div>
+     );
+  }
+
+  if (!url) {
+     return (
+       <div className="w-full h-full flex flex-col items-center justify-center gap-2">
+         <FileImage size={32} className="text-ink-300" />
+         <span className="text-xs text-ink-400 font-medium">No Preview</span>
+       </div>
+     );
+  }
+
+  /* eslint-disable-next-line @next/next/no-img-element */
+  return <img src={url} alt={template.name} className="w-full h-full object-cover" />;
 }

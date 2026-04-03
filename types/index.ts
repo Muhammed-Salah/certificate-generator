@@ -12,10 +12,17 @@ export interface Template {
   user_id: string;
 }
 
+export interface CustomTextField extends TextField {
+  id: string;      // Unique ID for mapping during generation
+  label: string;   // Display name in UI (e.g., "Certificate ID")
+  content: string; // Default text to preview (e.g., "CERT-001")
+}
+
 export interface TemplateConfig {
   template_id: string;
   name_field: TextField;
   description_field?: RichTextField;
+  additional_fields?: CustomTextField[];
   updated_at: string;
 }
 

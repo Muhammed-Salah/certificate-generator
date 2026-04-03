@@ -30,46 +30,11 @@ function fitFontSize(ctx: CanvasRenderingContext2D, text: string, font: string, 
   return size;
 }
 
-/**
- * Draw multi-line rich HTML text onto a canvas.
- * Strips HTML tags for canvas rendering (plain text fallback).
- */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .trim();
-}
-
-/**
- * Wrap text into lines that fit within maxWidth pixels.
- */
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const paragraphs = text.split('\n');
-  const lines: string[] = [];
-  for (const para of paragraphs) {
-    const words = para.split(' ');
-    let line = '';
-    for (const word of words) {
-      const test = line ? `${line} ${word}` : word;
-      if (ctx.measureText(test).width > maxWidth && line) {
-        lines.push(line); line = word;
-      } else { line = test; }
-    }
-    if (line) lines.push(line);
-    if (!para) lines.push('');
-  }
-  return lines;
-}
 
 interface RenderOptions {
   name: string;
   descriptionHtml?: string;
+  customFieldsData?: Record<string, string>;
   template: Template;
   config: TemplateConfig;
   templateImageBitmap: ImageBitmap;
@@ -77,11 +42,27 @@ interface RenderOptions {
 }
 
 export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvasElement> {
-  const { name, descriptionHtml, template, config, templateImageBitmap } = opts;
+  const { name, descriptionHtml, customFieldsData, template, config, templateImageBitmap } = opts;
   const scale = opts.scale ?? 1;
 
-  const W = template.width  * scale;
-  const H = template.height * scale;
+  // Use the bitmap as source of truth for proportions to avoid stretching
+  let W = template.width * scale;
+  let H = template.height * scale;
+
+  const bitmapAR = templateImageBitmap.width / templateImageBitmap.height;
+  const templateAR = W / H;
+
+  // If aspect ratios differ by more than 1%, trust the bitmap
+  if (Math.abs(bitmapAR - templateAR) > 0.01) {
+    if (template.file_type === 'pdf') {
+       // loadPdfPageBitmap uses scale:2, so we normalize here
+       W = (templateImageBitmap.width / 2) * scale;
+       H = (templateImageBitmap.height / 2) * scale;
+    } else {
+       // Maintain the mapped width but adjust height to match original image
+       H = W / bitmapAR;
+    }
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width  = W;
@@ -111,37 +92,174 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
   ctx.fillText(displayName, nx, ny, maxW);
   ctx.restore();
 
+  /* ─── Additional custom fields ─── */
+  if (config.additional_fields && customFieldsData) {
+    for (const field of config.additional_fields) {
+      const val = customFieldsData[field.id] || '';
+      if (!val.trim()) continue;
+
+      const dispVal = applyCase(val.trim(), field.case_transform);
+      const fx = field.x * W;
+      const fy = field.y * H;
+      const fMaxW = field.max_width * W;
+
+      let fFontSize = field.font_size * scale;
+      if (field.auto_size) {
+        fFontSize = fitFontSize(ctx, dispVal, field.font_family, fFontSize, fMaxW);
+      }
+
+      ctx.save();
+      ctx.font = `${field.case_transform === 'small-caps' ? 'small-caps ' : ''}${fFontSize}px "${field.font_family}"`;
+      ctx.fillStyle = field.font_color;
+      ctx.textAlign = field.alignment as CanvasTextAlign;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(dispVal, fx, fy, fMaxW);
+      ctx.restore();
+    }
+  }
+
   /* ─── Description field ─── */
   if (config.description_field && descriptionHtml !== undefined) {
     const df = config.description_field as RichTextField;
-    const plain  = stripHtml(descriptionHtml || df.content || '');
-    if (plain.trim()) {
-      // df.x is the LEFT edge of the box (stored as fraction)
+    const currentHtml = (descriptionHtml || df.content || '').trim();
+    if (currentHtml) {
       const dLeft  = (df.x - df.width / 2) * W;
       const dy     = df.y * H;
       const dw     = df.width  * W;
       const dh     = df.height * H;
       const dFontSize = df.font_size * scale;
+      const lineH     = dFontSize * 1.35; // slightly tighter for certificates usually
 
       ctx.save();
-      ctx.font      = `${dFontSize}px "${df.font_family}"`;
-      ctx.fillStyle = df.font_color;
-      ctx.textAlign = df.alignment as CanvasTextAlign;
-      ctx.textBaseline = 'top';
+      
+      // Part 1: Parsing HTML into Fragments
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(`<div>${currentHtml}</div>`, 'text/html');
+      
+      interface Fragment {
+        text: string;
+        bold: boolean;
+        italic: boolean;
+        underline: boolean;
+        isNewline?: boolean;
+      }
+      
+      const fragments: Fragment[] = [];
+      const traverse = (node: Node, style: { bold: boolean; italic: boolean; underline: boolean }) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const text = node.textContent || '';
+          if (text) {
+            fragments.push({ text, ...style });
+          }
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          const el = node as HTMLElement;
+          const tag = el.tagName.toLowerCase();
+          const newStyle = { ...style };
+          
+          if (tag === 'b' || tag === 'strong') newStyle.bold = true;
+          if (tag === 'i' || tag === 'em')     newStyle.italic = true;
+          if (tag === 'u')                     newStyle.underline = true;
+          
+          if (tag === 'br') {
+            fragments.push({ text: '\n', ...style, isNewline: true });
+          } else if (tag === 'p' || tag === 'div') {
+            // Check if not the first block-level to avoid extra space at top
+            if (fragments.length > 0 && !fragments[fragments.length-1].isNewline) {
+              fragments.push({ text: '\n', ...style, isNewline: true });
+            }
+          }
+          
+          for (const child of Array.from(el.childNodes)) {
+            traverse(child, newStyle);
+          }
+          
+          if (tag === 'p' || tag === 'div') {
+            fragments.push({ text: '\n', ...style, isNewline: true });
+          }
+        }
+      };
+      
+      traverse(doc.body.firstChild!, { bold: false, italic: false, underline: false });
 
-      const lines  = wrapText(ctx, plain, dw);
-      const lineH  = dFontSize * 1.4;
-      const totalH = lines.length * lineH;
+      // Part 2: Linearize and Wrap
+      interface StyledLine {
+        width: number;
+        items: { text: string; width: number; bold: boolean; italic: boolean; underline: boolean }[];
+      }
+      
+      const lines: StyledLine[] = [];
+      let currentLine: StyledLine = { width: 0, items: [] };
+
+      // Helper to set font based on style
+      const setCtxFont = (bold: boolean, italic: boolean) => {
+        ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${dFontSize}px "${df.font_family}"`;
+      };
+
+      fragments.forEach(frag => {
+        if (frag.text === '\n') {
+          lines.push(currentLine);
+          currentLine = { width: 0, items: [] };
+          return;
+        }
+
+        // Split text into words but keep spaces
+        const words = frag.text.split(/(\s+)/);
+        
+        words.forEach(word => {
+          if (!word) return;
+          setCtxFont(frag.bold, frag.italic);
+          const w = ctx.measureText(word).width;
+
+          if (currentLine.width + w > dw && currentLine.items.length > 0 && word.trim()) {
+            lines.push(currentLine);
+            // If it's a space that caused the overflow, skip it if it's leading
+            currentLine = { width: 0, items: [] };
+            if (word.trim()) {
+               currentLine.items.push({ text: word, width: w, bold: frag.bold, italic: frag.italic, underline: frag.underline });
+               currentLine.width = w;
+            }
+          } else {
+            currentLine.items.push({ text: word, width: w, bold: frag.bold, italic: frag.italic, underline: frag.underline });
+            currentLine.width += w;
+          }
+        });
+      });
+      lines.push(currentLine);
+
+      // Filter out any trailing line breaks caused by block tags
+      const renderedLines = lines.filter((l, idx) => l.width > 0 || (idx < lines.length - 1 && lines[idx+1].width > 0));
+
+      const totalH = renderedLines.length * lineH;
       const startY = dy + Math.max(0, (dh - totalH) / 2);
 
-      // Compute X anchor based on alignment
-      const textX = df.alignment === 'left'   ? dLeft :
-                    df.alignment === 'right'  ? dLeft + dw :
-                    dLeft + dw / 2; // center
+      // Part 3: Render
+      renderedLines.forEach((line, i) => {
+        let xOffset = 0;
+        if (df.alignment === 'center') xOffset = (dw - line.width) / 2;
+        else if (df.alignment === 'right') xOffset = dw - line.width;
 
-      lines.forEach((line, i) => {
-        ctx.fillText(line, textX, startY + i * lineH, dw);
+        let cursorX = dLeft + xOffset;
+        const lineY = startY + (i * lineH);
+
+        line.items.forEach(item => {
+          setCtxFont(item.bold, item.italic);
+          ctx.fillStyle = df.font_color;
+          ctx.textBaseline = 'top';
+          ctx.fillText(item.text, cursorX, lineY);
+          
+          if (item.underline) {
+            ctx.beginPath();
+            ctx.lineWidth = Math.max(1, dFontSize / 15);
+            ctx.moveTo(cursorX, lineY + dFontSize * 0.95);
+            ctx.lineTo(cursorX + item.width, lineY + dFontSize * 0.95);
+            ctx.strokeStyle = df.font_color;
+            ctx.stroke();
+          }
+          
+          cursorX += item.width;
+        });
       });
+      
       ctx.restore();
     }
   }
@@ -163,7 +281,9 @@ export async function loadImageBitmap(url: string): Promise<ImageBitmap> {
  */
 export async function loadPdfPageBitmap(url: string, pageNum = 1): Promise<{ bitmap: ImageBitmap; width: number; height: number }> {
   const pdfjsLib = await import('pdfjs-dist');
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+  // Use a hardcoded version as fallback if pdfjsLib.version is missing during bundle
+  const version = pdfjsLib.version || '4.4.168';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
 
   const pdf  = await pdfjsLib.getDocument(url).promise;
   const page = await pdf.getPage(pageNum);
