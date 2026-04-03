@@ -1,4 +1,16 @@
-import type { Template, TemplateConfig, TextField, RichTextField } from '@/types';
+import type { Template, TemplateConfig, TextField, RichTextField, FontRecord } from '@/types';
+import { PDFDocument, rgb, degrees, StandardFonts, PDFFont } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+
+// Helper to convert hex to RGB for pdf-lib
+function hexToRgb(hex: string) {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return result ? {
+    r: parseInt(result[1], 16) / 255,
+    g: parseInt(result[2], 16) / 255,
+    b: parseInt(result[3], 16) / 255
+  } : { r: 0, g: 0, b: 0 };
+}
 
 export function applyCase(text: string, transform: TextField['case_transform']): string {
   switch (transform) {
@@ -36,32 +48,273 @@ interface RenderOptions {
   descriptionHtml?: string;
   customFieldsData?: Record<string, string>;
   template: Template;
+  templateUrl?: string; // Full public Supabase URL for native PDF manipulation
   config: TemplateConfig;
-  templateImageBitmap: ImageBitmap;
+  templateImageBitmap: ImageBitmap | null; // Null if using fidelityPdf path
   scale?: number; // output scale multiplier (default 1)
+}
+
+/**
+ * Native PDF Manipulation using pdf-lib
+ * Preserves original quality by drawing on top of template objects.
+ */
+export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<string, ArrayBuffer>): Promise<Uint8Array> {
+  const { name, descriptionHtml, customFieldsData, template, config, templateUrl } = opts;
+  
+  if (!templateUrl) throw new Error('templateUrl is required for native PDF manipulation');
+  
+  // Load original template bytes
+  const response = await fetch(templateUrl);
+  const templateBytes = await response.arrayBuffer();
+  
+  let pdfDoc: PDFDocument;
+  let page;
+  let width: number, height: number;
+
+  if (template.file_type === 'pdf') {
+     pdfDoc = await PDFDocument.load(templateBytes);
+     page = pdfDoc.getPages()[0];
+     const size = page.getSize();
+     width = size.width;
+     height = size.height;
+  } else {
+     pdfDoc = await PDFDocument.create();
+     // Check for PNG or JPG
+     let img;
+     try {
+       img = await pdfDoc.embedPng(templateBytes);
+     } catch (e) {
+       img = await pdfDoc.embedJpg(templateBytes);
+     }
+     page = pdfDoc.addPage([img.width, img.height]);
+     page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+     width = img.width;
+     height = img.height;
+  }
+
+  pdfDoc.registerFontkit(fontkit);
+  
+  // Embed fonts
+  const embeddedFonts: Record<string, PDFFont> = {};
+  for (const fontName in fontBytes) {
+    embeddedFonts[fontName] = await pdfDoc.embedFont(fontBytes[fontName]);
+  }
+  const standardFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+  const getFont = (name: string) => embeddedFonts[name] || standardFont;
+
+  /* ─── Name field ─── */
+  const nf = config.name_field;
+  const displayName = applyCase(name.trim(), nf.case_transform);
+  const font = getFont(nf.font_family);
+  const color = hexToRgb(nf.font_color);
+  
+  let fontSize = nf.font_size * 0.75; // Convert px to pt approx
+  const nx = nf.x * width;
+  const ny = height - (nf.y * height); // PDF coordinates are bottom-up
+  const maxW = nf.max_width * width;
+
+  if (nf.auto_size) {
+    let currentW = font.widthOfTextAtSize(displayName, fontSize);
+    while (currentW > maxW && fontSize > 6) {
+      fontSize -= 0.5;
+      currentW = font.widthOfTextAtSize(displayName, fontSize);
+    }
+  }
+
+  let textX = nx;
+  if (nf.alignment === 'center') textX -= font.widthOfTextAtSize(displayName, fontSize) / 2;
+  else if (nf.alignment === 'right') textX -= font.widthOfTextAtSize(displayName, fontSize);
+
+  page.drawText(displayName, {
+    x: textX,
+    y: ny - (fontSize / 4), // Visual vertical middle adjustment
+    size: fontSize,
+    font,
+    color: rgb(color.r, color.g, color.b),
+  });
+
+  /* ─── Additional custom fields ─── */
+  if (config.additional_fields && customFieldsData) {
+    for (const field of config.additional_fields) {
+      const val = customFieldsData[field.id] || '';
+      if (!val.trim()) continue;
+
+      const dispVal = applyCase(val.trim(), field.case_transform);
+      const fFont = getFont(field.font_family);
+      const fColor = hexToRgb(field.font_color);
+      let fSize = field.font_size * 0.75;
+      const fx = field.x * width;
+      const fy = height - (field.y * height);
+      const fkMaxW = field.max_width * width;
+
+      if (field.auto_size) {
+        let cw = fFont.widthOfTextAtSize(dispVal, fSize);
+        while (cw > fkMaxW && fSize > 6) { fSize -= 0.5; cw = fFont.widthOfTextAtSize(dispVal, fSize); }
+      }
+
+      let tx = fx;
+      if (field.alignment === 'center') tx -= fFont.widthOfTextAtSize(dispVal, fSize) / 2;
+      else if (field.alignment === 'right') tx -= fFont.widthOfTextAtSize(dispVal, fSize);
+
+      page.drawText(dispVal, {
+        x: tx, y: fy - (fSize / 4), size: fSize, font: fFont, color: rgb(fColor.r, fColor.g, fColor.b),
+      });
+    }
+  }
+
+  /* ─── Description field (Rich Text-aware for PDF) ─── */
+  if (config.description_field && descriptionHtml) {
+     const df = config.description_field;
+     const dBoxW = df.width * width;
+     const dFontSize = df.font_size * 0.75;
+     const dColor = hexToRgb(df.font_color);
+     const dFont = getFont(df.font_family);
+     const lineH = dFontSize * 1.35;
+
+     const fragments = parseHtmlToFragments(descriptionHtml);
+     
+     interface StyledLine {
+       width: number;
+       items: { text: string; width: number; bold: boolean; italic: boolean; underline: boolean }[];
+     }
+     
+     const lines: StyledLine[] = [];
+     let currentLine: StyledLine = { width: 0, items: [] };
+
+     fragments.forEach(frag => {
+       if (frag.isNewline) {
+         lines.push(currentLine);
+         currentLine = { width: 0, items: [] };
+         return;
+       }
+       const words = frag.text.split(/(\s+)/);
+       words.forEach(word => {
+         if (!word) return;
+         const w = dFont.widthOfTextAtSize(word, dFontSize);
+         if (currentLine.width + w > dBoxW && currentLine.items.length > 0 && word.trim()) {
+           lines.push(currentLine);
+           currentLine = { width: 0, items: [] };
+           if (word.trim()) { 
+             currentLine.items.push({ ...frag, text: word, width: w }); 
+             currentLine.width = w; 
+           }
+         } else {
+           currentLine.items.push({ ...frag, text: word, width: w });
+           currentLine.width += w;
+         }
+       });
+     });
+     lines.push(currentLine);
+
+     const renderedLines = lines.filter((l, idx) => l.width > 0 || (idx < lines.length - 1 && lines[idx+1].width > 0));
+     const totalH = renderedLines.length * lineH;
+     const dBoxYCenter = height - (df.y * height);
+     const startY = dBoxYCenter + (totalH / 2);
+
+     renderedLines.forEach((line, i) => {
+        let lx = (df.x - df.width/2) * width;
+        if (df.alignment === 'center') lx += (dBoxW - line.width) / 2;
+        else if (df.alignment === 'right') lx += (dBoxW - line.width);
+
+        const ly = startY - (i * lineH) - dFontSize;
+
+        line.items.forEach(item => {
+           page.drawText(item.text, {
+             x: lx,
+             y: ly,
+             size: dFontSize,
+             font: dFont,
+             color: rgb(dColor.r, dColor.g, dColor.b),
+           });
+           
+           if (item.underline) {
+              page.drawLine({
+                start: { x: lx, y: ly - 2 },
+                end: { x: lx + item.width, y: ly - 2 },
+                thickness: dFontSize / 15,
+                color: rgb(dColor.r, dColor.g, dColor.b),
+              });
+           }
+           lx += item.width;
+        });
+     });
+  }
+
+  return await pdfDoc.save();
+}
+
+interface Fragment {
+  text: string;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  isNewline?: boolean;
+}
+
+function parseHtmlToFragments(html: string): Fragment[] {
+  if (typeof window === 'undefined') return [{ text: html.replace(/<[^>]*>/g, ''), bold: false, italic: false, underline: false }];
+  
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
+  const fragments: Fragment[] = [];
+
+  const traverse = (node: Node, style: { bold: boolean; italic: boolean; underline: boolean }) => {
+    if (node.nodeType === 3) { // TEXT_NODE
+      const text = node.textContent || '';
+      if (text) fragments.push({ text, ...style });
+    } else if (node.nodeType === 1) { // ELEMENT_NODE
+      const el = node as HTMLElement;
+      const tag = el.tagName.toLowerCase();
+      const newStyle = { ...style };
+      if (tag === 'b' || tag === 'strong') newStyle.bold = true;
+      if (tag === 'i' || tag === 'em') newStyle.italic = true;
+      if (tag === 'u') newStyle.underline = true;
+      
+      if (tag === 'br') {
+        fragments.push({ text: '\n', ...style, isNewline: true });
+      } else if (tag === 'p' || tag === 'div') {
+        if (fragments.length > 0 && !fragments[fragments.length-1].isNewline) {
+          fragments.push({ text: '\n', ...style, isNewline: true });
+        }
+      }
+      for (const child of Array.from(el.childNodes)) traverse(child, newStyle);
+      if (tag === 'p' || tag === 'div') fragments.push({ text: '\n', ...style, isNewline: true });
+    }
+  };
+
+  traverse(doc.body.firstChild!, { bold: false, italic: false, underline: false });
+  return fragments;
 }
 
 export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvasElement> {
   const { name, descriptionHtml, customFieldsData, template, config, templateImageBitmap } = opts;
-  const scale = opts.scale ?? 1;
+  const scale = opts.scale || 1.0;
+  if (!templateImageBitmap) throw new Error('Template image bitmap is required for canvas rendering');
 
-  // Use the bitmap as source of truth for proportions to avoid stretching
+  // Use the bitmap as source of truth for proportions and baseline quality
   let W = template.width * scale;
   let H = template.height * scale;
-
+  
   const bitmapAR = templateImageBitmap.width / templateImageBitmap.height;
-  const templateAR = W / H;
 
-  // If aspect ratios differ by more than 1%, trust the bitmap
-  if (Math.abs(bitmapAR - templateAR) > 0.01) {
-    if (template.file_type === 'pdf') {
-       // loadPdfPageBitmap uses scale:2, so we normalize here
-       W = (templateImageBitmap.width / 2) * scale;
-       H = (templateImageBitmap.height / 2) * scale;
-    } else {
-       // Maintain the mapped width but adjust height to match original image
-       H = W / bitmapAR;
-    }
+  // If template is PDF, loadPdfPageBitmap gave us a 4x version of the points
+  if (template.file_type === 'pdf') {
+      W = (templateImageBitmap.width / 4) * scale;
+      H = (templateImageBitmap.height / 4) * scale;
+  } else {
+      // If template is PNG, ensure we aren't downscaling if the user wants high quality
+      if (scale > 1.0) {
+          W = Math.max(W, templateImageBitmap.width);
+          H = W / bitmapAR;
+      }
+  }
+
+  const templateAR = (template.width * scale) / (template.height * scale);
+
+  // If aspect ratios differ significantly from stored metadata, trust the bitmap proportions
+  if (Math.abs(bitmapAR - templateAR) > 0.01 && template.file_type !== 'pdf') {
+     H = W / bitmapAR;
   }
 
   const canvas = document.createElement('canvas');
@@ -287,7 +540,7 @@ export async function loadPdfPageBitmap(url: string, pageNum = 1): Promise<{ bit
 
   const pdf  = await pdfjsLib.getDocument(url).promise;
   const page = await pdf.getPage(pageNum);
-  const vp   = page.getViewport({ scale: 2 }); // 2× for quality
+  const vp   = page.getViewport({ scale: 4 }); // Use 4× (approx 288dpi) for ultra high resolution
 
   const canvas = document.createElement('canvas');
   canvas.width  = vp.width;

@@ -237,6 +237,24 @@ export default function GeneratePage() {
   }, [config]);
 
   /* ─── Generate ─── */
+  const fetchFontBytes = useCallback(async () => {
+    if (!config) return {};
+    const used = new Set([config.name_field.font_family, config.description_field?.font_family]);
+    (config.additional_fields || []).forEach(f => used.add(f.font_family));
+    
+    const bytesMap: Record<string, ArrayBuffer> = {};
+    for (const name of Array.from(used)) {
+       if (!name) continue;
+       const fRec = fonts.find(f => f.name === name);
+       if (fRec) {
+          const { data } = supabase.storage.from('fonts').getPublicUrl(fRec.file_path);
+          const res = await fetch(data.publicUrl);
+          bytesMap[name] = await res.arrayBuffer();
+       }
+    }
+    return bytesMap;
+  }, [config, fonts, supabase]);
+
   const handleGenerate = useCallback(async () => {
     if (!selected || !config) return;
     setGenerating(true); setError('');
@@ -244,63 +262,113 @@ export default function GeneratePage() {
     setGenProgress({ done: 0, total: valid.length });
 
     try {
-      const bitmap = await getBitmap(selected);
+      const { data: tData } = supabase.storage.from('templates').getPublicUrl(selected.file_path);
+      const templateUrl = tData.publicUrl;
+      
+      const bitmap = outFormat === 'png' ? await getBitmap(selected) : null;
+      const fontBytes = outFormat === 'pdf' ? await fetchFontBytes() : {};
 
       if (valid.length === 1) {
+        const row = valid[0];
         const customFieldsData: Record<string, string> = {};
         if (config.additional_fields) {
-          for (const f of config.additional_fields) { customFieldsData[f.id] = valid[0][f.label] || ''; }
+           config.additional_fields.forEach(f => {
+              customFieldsData[f.id] = row[f.label]?.trim() || f.content || f.label;
+           });
         }
 
-        const canvas = await renderCertificate({
-          name: valid[0].Name, descriptionHtml: descOverride,
-          customFieldsData,
-          template: selected, config, templateImageBitmap: bitmap, scale: 1,
-        });
-        const safeName = valid[0].Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
-        if (outFormat === 'png') {
-          triggerDownload(await canvasToPngBlob(canvas), `${safeName}.png`);
+        let resultBlob: Blob;
+        const safeSubName = row.Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+
+        if (outFormat === 'pdf') {
+          const { renderFidelityPdf } = await import('@/lib/certGen');
+          const pdfBytes = await renderFidelityPdf({
+            name: row.Name,
+            descriptionHtml: descOverride || config.description_field?.content || '',
+            customFieldsData,
+            template: selected, 
+            templateUrl,
+            config,
+            templateImageBitmap: null,
+          }, fontBytes);
+          resultBlob = new Blob([pdfBytes as any], { type: 'application/pdf' });
         } else {
-          triggerDownload(await canvasToPdfBlob(canvas, valid[0].Name), `${safeName}.pdf`);
+          const canvas = await renderCertificate({
+            name: row.Name,
+            descriptionHtml: descOverride || config.description_field?.content || '',
+            customFieldsData,
+            template: selected, config,
+            templateImageBitmap: bitmap!,
+            scale: 4, // Ultra high resolution PNG
+          });
+          const { canvasToPngBlob } = await import('@/lib/certGen');
+          resultBlob = await canvasToPngBlob(canvas);
         }
+        
+        triggerDownload(resultBlob, `${safeSubName}.${outFormat}`);
         setGenProgress({ done: 1, total: 1 });
-        setIsGenerated(true);
       } else {
-        const canvases: HTMLCanvasElement[] = [];
-        const entries:  { name: string; blob: Blob }[] = [];
+        // Bulk generation
+        const entries: { name: string; blob: Blob }[] = [];
+        const { renderFidelityPdf, renderCertificate, canvasToPngBlob } = await import('@/lib/certGen');
 
         for (let i = 0; i < valid.length; i++) {
+          const row = valid[i];
           const customFieldsData: Record<string, string> = {};
           if (config.additional_fields) {
-            for (const f of config.additional_fields) { customFieldsData[f.id] = valid[i][f.label] || ''; }
+             config.additional_fields.forEach(f => {
+                customFieldsData[f.id] = row[f.label]?.trim() || f.content || f.label;
+             });
           }
-          const canvas = await renderCertificate({
-            name: valid[i].Name, descriptionHtml: descOverride,
-            customFieldsData,
-            template: selected, config, templateImageBitmap: bitmap, scale: 1,
-          });
-          canvases.push(canvas);
 
-          if (bulkFmt === 'zip') {
-            const blob = outFormat === 'png'
-              ? await canvasToPngBlob(canvas)
-              : await canvasToPdfBlob(canvas, valid[i].Name);
-            const safeName = valid[i].Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
-            entries.push({ name: `${safeName}.${outFormat}`, blob });
+          const safeRowName = row.Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+
+          if (outFormat === 'pdf') {
+             const pdfBytes = await renderFidelityPdf({
+                name: row.Name,
+                descriptionHtml: descOverride || config.description_field?.content || '',
+                customFieldsData,
+                template: selected, 
+                templateUrl,
+                config,
+                templateImageBitmap: null,
+             }, fontBytes);
+             entries.push({ name: `${safeRowName}.${outFormat}`, blob: new Blob([pdfBytes as any], { type: 'application/pdf' }) });
+          } else {
+             const canvas = await renderCertificate({
+                name: row.Name,
+                descriptionHtml: descOverride || config.description_field?.content || '',
+                customFieldsData,
+                template: selected, config,
+                templateImageBitmap: bitmap!,
+                scale: 4,
+             });
+             const blob = await canvasToPngBlob(canvas);
+             entries.push({ name: `${safeRowName}.${outFormat}`, blob });
           }
           setGenProgress({ done: i + 1, total: valid.length });
           await new Promise(r => setTimeout(r, 0));
         }
 
-        if (bulkFmt === 'zip') {
-          await blobsToZip(entries, 'certificates.zip');
+        if (outFormat === 'pdf' && bulkFmt === 'merged-pdf') {
+           const { PDFDocument } = await import('pdf-lib');
+           const mergedPdf = await PDFDocument.create();
+           for (const entry of entries) {
+              const donor = await PDFDocument.load(await entry.blob.arrayBuffer());
+              const copiedPages = await mergedPdf.copyPages(donor, donor.getPageIndices());
+              copiedPages.forEach(p => mergedPdf.addPage(p));
+           }
+           const finalBytes = await mergedPdf.save();
+           triggerDownload(new Blob([finalBytes as any], { type: 'application/pdf' }), 'All_Certificates.pdf');
         } else {
-          triggerDownload(await canvasesToMergedPdf(canvases), 'certificates-merged.pdf');
+           const { blobsToZip } = await import('@/lib/certGen');
+           await blobsToZip(entries, 'Certificates.zip');
         }
-        setIsGenerated(true);
       }
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Generation failed. Please try again.');
+      setIsGenerated(true);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || 'Generation failed. Please try again.');
     } finally {
       setGenerating(false);
     }
