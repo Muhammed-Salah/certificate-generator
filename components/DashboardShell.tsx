@@ -165,11 +165,16 @@ export default function DashboardShell({
 
         {/* Floating Credit Label */}
         <div className="fixed bottom-4 right-4 z-50 pointer-events-none">
-          <div className="px-3 py-1.5 rounded-full bg-white/40 backdrop-blur-md border border-white/40 shadow-sm flex items-center gap-2">
+          <a
+            href="https://www.linkedin.com/in/muhammed-salah-kt/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1.5 rounded-full bg-white/40 backdrop-blur-md border border-white/40 shadow-sm flex items-center gap-2 pointer-events-auto hover:bg-white/60 transition-all duration-200"
+          >
             <span className="text-[10px] font-medium text-ink-500 whitespace-nowrap">
-              Made with ❤️ by Salah using AI.
+              Made with ❤️ by <span className="font-bold underline">Salah</span> using <span className="font-bold">AI</span>.
             </span>
-          </div>
+          </a>
         </div>
       </main>
     </div>
