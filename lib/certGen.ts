@@ -6,6 +6,7 @@ export function applyCase(text: string, transform: TextField['case_transform']):
     case 'lowercase':  return text.toLowerCase();
     case 'capitalize': return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
     case 'titlecase':  return text.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+    case 'small-caps': return text; // Font variant handles small-caps, so leave original casing intact
     default:           return text;
   }
 }
@@ -103,7 +104,7 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
   }
 
   ctx.save();
-  ctx.font      = `${fontSize}px "${nf.font_family}"`;
+  ctx.font = `${nf.case_transform === 'small-caps' ? 'small-caps ' : ''}${fontSize}px "${nf.font_family}"`;
   ctx.fillStyle = nf.font_color;
   ctx.textAlign = nf.alignment as CanvasTextAlign;
   ctx.textBaseline = 'middle';
@@ -162,7 +163,7 @@ export async function loadImageBitmap(url: string): Promise<ImageBitmap> {
  */
 export async function loadPdfPageBitmap(url: string, pageNum = 1): Promise<{ bitmap: ImageBitmap; width: number; height: number }> {
   const pdfjsLib = await import('pdfjs-dist');
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
   const pdf  = await pdfjsLib.getDocument(url).promise;
   const page = await pdf.getPage(pageNum);

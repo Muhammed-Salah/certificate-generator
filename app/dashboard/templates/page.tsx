@@ -37,6 +37,8 @@ export default function TemplatesPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
+      if (file.size > 10 * 1024 * 1024) throw new Error('File size exceeds 10MB limit');
+
       const ext      = file.name.split('.').pop()?.toLowerCase();
       const type     = ext === 'pdf' ? 'pdf' : 'png';
       const safeName = file.name.replace(/\s/g, '_').replace(/[^a-zA-Z0-9._-]/g, '');
@@ -52,13 +54,18 @@ export default function TemplatesPage() {
         width = dims.width; height = dims.height;
       }
 
-      const { error: dbError } = await supabase.from('templates').insert({
+      const { data: insertData, error: dbError } = await supabase.from('templates').insert({
         name: file.name.replace(/\.[^/.]+$/, ''),
         file_path: path, file_type: type,
         width, height, user_id: user.id,
-      });
+      }).select().single();
       if (dbError) throw dbError;
-      await load();
+      
+      if (insertData) {
+        router.push(`/dashboard/templates/${insertData.id}/configure`);
+      } else {
+        await load();
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Upload failed');
     } finally {
@@ -69,7 +76,13 @@ export default function TemplatesPage() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept:   { 'image/png': ['.png'], 'application/pdf': ['.pdf'] },
     maxFiles: 1,
+    multiple: false,
+    maxSize:  10485760, // 10MB
     onDrop:   handleUpload,
+    onDropRejected: (rejections) => {
+      const msg = rejections[0]?.errors[0]?.message || 'File rejected';
+      setError(msg);
+    }
   });
 
   const handleDelete = useCallback(async (template: Template) => {

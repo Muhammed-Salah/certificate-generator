@@ -67,7 +67,15 @@ export default function DashboardShell({
             const active = pathname === href || (href !== '/dashboard' && pathname.startsWith(href));
             return (
               <Link key={href} href={href}
-                    onClick={() => setSidebarOpen(false)}
+                    onClick={(e) => {
+                      if (typeof window !== 'undefined' && window.__unsavedChanges) {
+                        if (!confirm('You have unsaved changes. Are you sure you want to leave?')) {
+                          e.preventDefault();
+                          return;
+                        }
+                      }
+                      setSidebarOpen(false);
+                    }}
                     className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm
                                 transition-all duration-150 group ${
                       active

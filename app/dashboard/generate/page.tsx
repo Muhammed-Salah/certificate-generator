@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import Papa from 'papaparse';
 
-type Step      = 'select' | 'names' | 'preview' | 'generate';
+type Step      = 'select' | 'names' | 'generate';
 type OutFormat = 'png' | 'pdf';
 type BulkFmt   = 'zip' | 'merged-pdf';
 
@@ -43,6 +43,8 @@ export default function GeneratePage() {
   const [previewDataUrl, setPreviewDataUrl] = useState<string>('');
   const [previewLoading, setPreviewLoading] = useState(false);
   const previewContainerRef = useRef<HTMLDivElement>(null);
+  
+  const [focusNew, setFocusNew] = useState(false);
 
   /* ─── Generation ─── */
   const [generating, setGenerating]   = useState(false);
@@ -66,9 +68,9 @@ export default function GeneratePage() {
       if (tpls) {
         const enriched = (tpls as Record<string, unknown>[]).map(t => ({
           ...t,
-          config: Array.isArray(t.template_configs) && (t.template_configs as unknown[]).length > 0
-            ? (t.template_configs as TemplateConfig[])[0]
-            : undefined,
+          config: Array.isArray(t.template_configs) && t.template_configs.length > 0
+            ? t.template_configs[0]
+            : (!Array.isArray(t.template_configs) && t.template_configs ? t.template_configs : undefined),
         })) as Template[];
         setTemplates(enriched);
       }
@@ -130,8 +132,17 @@ export default function GeneratePage() {
   }, [selected, config, names, previewIdx, descOverride, getBitmap]);
 
   useEffect(() => {
-    if (step === 'preview') renderPreview();
-  }, [step, previewIdx, renderPreview]);
+    if (step === 'names') renderPreview();
+  }, [step, previewIdx, renderPreview, names, descOverride]);
+
+  /* ─── Unsaved changes handle ─── */
+  useEffect(() => {
+    const hasData = (names.length > 1 || names[0].trim() !== '') || !!descOverride;
+    window.__unsavedChanges = hasData;
+    const h = (e: BeforeUnloadEvent) => { if (window.__unsavedChanges) { e.preventDefault(); e.returnValue = ''; } };
+    window.addEventListener('beforeunload', h);
+    return () => { window.removeEventListener('beforeunload', h); window.__unsavedChanges = false; };
+  }, [names, descOverride]);
 
   /* ─── Select template ─── */
   const handleSelectTemplate = useCallback(async (t: Template) => {
@@ -142,6 +153,9 @@ export default function GeneratePage() {
       .eq('template_id', t.id)
       .maybeSingle();
     setConfig(data as TemplateConfig | null);
+    if (data && (data as TemplateConfig).description_field) {
+      setDescOverride((data as TemplateConfig).description_field?.content || '');
+    }
   }, [supabase]);
 
   /* ─── CSV upload ─── */
@@ -195,6 +209,7 @@ export default function GeneratePage() {
             entries.push({ name: `${safeName}.${outFormat}`, blob });
           }
           setGenProgress({ done: i + 1, total: valid.length });
+          await new Promise(r => setTimeout(r, 0));
         }
 
         if (bulkFmt === 'zip') {
@@ -221,9 +236,8 @@ export default function GeneratePage() {
 
   const STEPS = [
     { key: 'select' as Step,   label: 'Select Template' },
-    { key: 'names'  as Step,   label: 'Enter Names' },
-    { key: 'preview' as Step,  label: 'Preview' },
-    { key: 'generate' as Step, label: 'Generate' },
+    { key: 'names'  as Step,   label: 'Names & Preview' },
+    { key: 'generate' as Step, label: 'Output Options' },
   ];
   const stepIdx = STEPS.findIndex(s => s.key === step);
 
@@ -307,11 +321,6 @@ export default function GeneratePage() {
                           </div>
                         </div>
                       )}
-                      {!t.config && (
-                        <div className="absolute top-2 left-2 bg-amber-100 text-amber-700 text-xs px-2 py-0.5 rounded-full">
-                          Needs config
-                        </div>
-                      )}
                     </div>
                     <div className="p-3">
                       <p className="font-medium text-ink-800 text-sm truncate">{t.name}</p>
@@ -336,164 +345,155 @@ export default function GeneratePage() {
         </div>
       )}
 
-      {/* ══════ STEP 2: NAMES ══════ */}
+      {/* ══════ STEP 2: NAMES & PREVIEW ══════ */}
       {step === 'names' && (
         <div className="animate-slide-up">
           <div className="flex items-center gap-3 mb-6">
             <button onClick={() => setStep('select')} className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
               <ChevronLeft size={18}/>
             </button>
-            <h2 className="font-display text-xl text-ink-800">Enter names</h2>
+            <h2 className="font-display text-xl text-ink-800">Add Names & Preview</h2>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Manual entry */}
-            <div className="card p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Users size={16} className="text-ink-500"/>
-                <h3 className="font-medium text-ink-700 text-sm">Manual Entry</h3>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left Column: Data Entry */}
+            <div className="lg:col-span-5 space-y-4">
+              {/* Manual entry */}
+              <div className="card p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Users size={16} className="text-ink-500"/>
+                  <h3 className="font-medium text-ink-700 text-sm">Manual Entry</h3>
+                </div>
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {names.map((n, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        ref={el => { if (focusNew && i === names.length - 1 && el && document.activeElement !== el) { el.focus(); setFocusNew(false); } }}
+                        className="input flex-1 py-2"
+                        placeholder={`Name ${i + 1}`}
+                        value={n}
+                        onChange={e => {
+                          const next = [...names];
+                          next[i] = e.target.value;
+                          setNames(next);
+                        }}
+                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setNames(p => [...p, '']); setFocusNew(true); } }}
+                      />
+                      {names.length > 1 && (
+                        <button onClick={() => {
+                          const next = names.filter((_, j) => j !== i);
+                          setNames(next);
+                          setPreviewIdx(p => Math.min(p, next.length - 1));
+                        }} className="p-1.5 text-ink-300 hover:text-red-500 rounded transition-colors">
+                          <Trash2 size={14}/>
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <button onClick={() => { setNames(p => [...p, '']); setFocusNew(true); }}
+                        className="mt-3 text-sm text-ink-500 hover:text-ink-800 transition-colors">
+                  + Add another name
+                </button>
               </div>
-              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                {names.map((n, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <input
-                      className="input flex-1 py-2"
-                      placeholder={`Name ${i + 1}`}
-                      value={n}
-                      onChange={e => {
-                        const next = [...names];
-                        next[i] = e.target.value;
-                        setNames(next);
-                      }}
-                      onKeyDown={e => { if (e.key === 'Enter') setNames(p => [...p, '']); }}
-                    />
-                    {names.length > 1 && (
-                      <button onClick={() => setNames(p => p.filter((_, j) => j !== i))}
-                              className="p-1.5 text-ink-300 hover:text-red-500 rounded transition-colors">
-                        <Trash2 size={14}/>
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <button onClick={() => setNames(p => [...p, ''])}
-                      className="mt-3 text-sm text-ink-500 hover:text-ink-800 transition-colors">
-                + Add another name
-              </button>
-            </div>
 
-            {/* CSV upload */}
-            <div className="card p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Upload size={16} className="text-ink-500"/>
-                <h3 className="font-medium text-ink-700 text-sm">CSV Upload (Bulk)</h3>
+              {/* CSV upload */}
+              <div className="card p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Upload size={16} className="text-ink-500"/>
+                  <h3 className="font-medium text-ink-700 text-sm">CSV Upload (Bulk)</h3>
+                </div>
+                <label className="block border-2 border-dashed border-ink-200 rounded-xl p-4 text-center cursor-pointer
+                                 hover:border-ink-300 hover:bg-parchment-50 transition-all duration-200">
+                  <Upload size={20} className="text-ink-400 mx-auto mb-2"/>
+                  <p className="text-sm text-ink-600 font-medium">Drop CSV or click to browse</p>
+                  <p className="text-xs text-ink-400 mt-1">One name per row</p>
+                  <input type="file" accept=".csv" className="hidden"
+                         onChange={e => { if (e.target.files?.[0]) handleCsvUpload(e.target.files[0]); }}/>
+                </label>
+                {validNames.length > 1 && (
+                  <p className="mt-3 text-xs text-green-700 font-medium">✓ {validNames.length} names loaded</p>
+                )}
               </div>
-              <label className="block border-2 border-dashed border-ink-200 rounded-xl p-6 text-center cursor-pointer
-                               hover:border-ink-300 hover:bg-parchment-50 transition-all duration-200">
-                <Upload size={24} className="text-ink-400 mx-auto mb-2"/>
-                <p className="text-sm text-ink-600 font-medium">Drop CSV or click to browse</p>
-                <p className="text-xs text-ink-400 mt-1">One name per row — no header needed</p>
-                <input type="file" accept=".csv" className="hidden"
-                       onChange={e => { if (e.target.files?.[0]) handleCsvUpload(e.target.files[0]); }}/>
-              </label>
-              {validNames.length > 1 && (
-                <p className="mt-3 text-xs text-green-700 font-medium">✓ {validNames.length} names loaded</p>
+
+              {/* Description override */}
+              {config?.description_field && (
+                <div className="card p-5">
+                  <div className="flex items-center gap-2 mb-3">
+                    <FileText size={16} className="text-ink-500"/>
+                    <h3 className="font-medium text-ink-700 text-sm">Description</h3>
+                  </div>
+                  <div
+                    contentEditable suppressContentEditableWarning
+                    className="rich-editor input rounded-lg p-3 min-h-[60px]"
+                    data-placeholder="Start typing..."
+                    style={{ fontFamily: config.description_field.font_family, fontSize: Math.min(config.description_field.font_size * 0.7, 16) }}
+                    onBlur={e => setDescOverride((e.target as HTMLDivElement).innerHTML)}
+                    dangerouslySetInnerHTML={{ __html: descOverride || '' }}
+                  />
+                  <div className="flex gap-1 mt-1.5">
+                    {(['bold','italic','underline'] as const).map(cmd => (
+                      <button key={cmd} type="button"
+                              onMouseDown={e => { e.preventDefault(); document.execCommand(cmd); setDescOverride((e.target as any).parentElement.previousElementSibling.innerHTML); }}
+                              className="px-2 py-1 text-xs border border-ink-200 rounded hover:bg-ink-50 text-ink-600 capitalize">
+                        {cmd}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
-          </div>
 
-          {/* Description override */}
-          {config?.description_field && (
-            <div className="card p-5 mt-4">
-              <div className="flex items-center gap-2 mb-3">
-                <FileText size={16} className="text-ink-500"/>
-                <h3 className="font-medium text-ink-700 text-sm">Description override <span className="text-ink-400 font-normal">(optional — leave blank to use template default)</span></h3>
-              </div>
-              <div
-                contentEditable suppressContentEditableWarning
-                className="rich-editor input rounded-lg p-3 min-h-[60px]"
-                data-placeholder="Leave blank to use template default…"
-                style={{ fontFamily: config.description_field.font_family, fontSize: Math.min(config.description_field.font_size * 0.7, 16) }}
-                onInput={e => setDescOverride((e.target as HTMLDivElement).innerHTML)}
-                dangerouslySetInnerHTML={{ __html: descOverride }}
-              />
-              <div className="flex gap-1 mt-1.5">
-                {(['bold','italic','underline'] as const).map(cmd => (
-                  <button key={cmd} type="button"
-                          onMouseDown={e => { e.preventDefault(); document.execCommand(cmd); }}
-                          className="px-2 py-1 text-xs border border-ink-200 rounded hover:bg-ink-50 text-ink-600 capitalize">
-                    {cmd}
-                  </button>
-                ))}
+            {/* Right Column: Preview */}
+            <div className="lg:col-span-7 flex flex-col">
+              <div ref={previewContainerRef}
+                   className="relative bg-ink-100 rounded-2xl overflow-hidden flex-1 flex flex-col items-center justify-center p-4 min-h-[400px]">
+                
+                {validNames.length > 1 && (
+                  <div className="absolute top-4 left-4 right-4 flex items-center justify-between text-ink-500 text-sm px-3 py-2 bg-white/80 backdrop-blur rounded-lg shadow-sm z-10">
+                    <span className="font-medium">{previewIdx + 1} of {validNames.length}</span>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => setPreviewIdx(i => Math.max(0, i - 1))} disabled={previewIdx === 0}
+                              className="w-7 h-7 flex items-center justify-center rounded bg-white shadow-sm hover:bg-ink-50 disabled:opacity-50">
+                        <ChevronLeft size={16}/>
+                      </button>
+                      <button onClick={() => setPreviewIdx(i => Math.min(validNames.length - 1, i + 1))} disabled={previewIdx >= validNames.length - 1}
+                              className="w-7 h-7 flex items-center justify-center rounded bg-white shadow-sm hover:bg-ink-50 disabled:opacity-50">
+                        <ChevronRight size={16}/>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {previewLoading && !previewDataUrl ? (
+                  <div className="flex flex-col items-center gap-3">
+                    <svg className="animate-spin w-8 h-8 text-accent-gold" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    <p className="text-ink-500 text-sm">Rendering preview…</p>
+                  </div>
+                ) : previewDataUrl ? (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img src={previewDataUrl} alt="Certificate preview"
+                       className="max-w-full max-h-full object-contain shadow-strong rounded-lg transition-opacity duration-300"
+                       style={{ opacity: previewLoading ? 0.6 : 1 }}/>
+                ) : validNames.length === 0 ? (
+                  <p className="text-ink-400">Enter a name to see preview</p>
+                ) : (
+                  <p className="text-ink-400">Loading preview…</p>
+                )}
               </div>
             </div>
-          )}
+          </div>
 
           <div className="mt-6 flex justify-between">
-            <button onClick={() => setStep('select')} className="btn-secondary"><ChevronLeft size={16}/> Back</button>
-            <button onClick={() => { setPreviewIdx(0); setPreviewDataUrl(''); setStep('preview'); }}
+            <button onClick={() => setStep('select')} className="btn-secondary"><ChevronLeft size={16}/> Default Configs</button>
+            <button onClick={() => setStep('generate')}
                     disabled={validNames.length === 0}
                     className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed">
-              Preview <Eye size={16}/>
+              Configure Output <ChevronRight size={16}/>
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* ══════ STEP 3: PREVIEW ══════ */}
-      {step === 'preview' && (
-        <div className="animate-slide-up">
-          <div className="flex items-center gap-3 mb-6">
-            <button onClick={() => setStep('names')} className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
-              <ChevronLeft size={18}/>
-            </button>
-            <h2 className="font-display text-xl text-ink-800">Preview</h2>
-            {validNames.length > 1 && (
-              <span className="ml-auto text-sm text-ink-500">{previewIdx + 1} / {validNames.length}</span>
-            )}
-          </div>
-
-          <div ref={previewContainerRef}
-               className="relative bg-ink-100 rounded-2xl overflow-hidden flex items-center justify-center"
-               style={{ minHeight: 320 }}>
-            {previewLoading ? (
-              <div className="flex flex-col items-center gap-3 py-16">
-                <svg className="animate-spin w-8 h-8 text-accent-gold" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg>
-                <p className="text-ink-500 text-sm">Rendering preview…</p>
-              </div>
-            ) : previewDataUrl ? (
-              /* eslint-disable-next-line @next/next/no-img-element */
-              <img src={previewDataUrl} alt="Certificate preview"
-                   className="max-w-full max-h-[60vh] shadow-strong rounded-lg m-4"/>
-            ) : (
-              <p className="text-ink-400 py-16">Generating preview…</p>
-            )}
-          </div>
-
-          {validNames.length > 1 && (
-            <div className="flex items-center justify-center gap-3 mt-4">
-              <button onClick={() => setPreviewIdx(i => Math.max(0, i - 1))}
-                      disabled={previewIdx === 0}
-                      className="p-2 text-ink-400 hover:text-ink-700 disabled:opacity-30 rounded-lg hover:bg-ink-100 transition-colors">
-                <ChevronLeft size={18}/>
-              </button>
-              <span className="text-sm font-medium text-ink-700 px-3 min-w-[160px] text-center">
-                {validNames[previewIdx]}
-              </span>
-              <button onClick={() => setPreviewIdx(i => Math.min(validNames.length - 1, i + 1))}
-                      disabled={previewIdx === validNames.length - 1}
-                      className="p-2 text-ink-400 hover:text-ink-700 disabled:opacity-30 rounded-lg hover:bg-ink-100 transition-colors">
-                <ChevronRight size={18}/>
-              </button>
-            </div>
-          )}
-
-          <div className="mt-6 flex justify-between">
-            <button onClick={() => setStep('names')} className="btn-secondary"><ChevronLeft size={16}/> Back</button>
-            <button onClick={() => setStep('generate')} className="btn-primary">Configure Output <ChevronRight size={16}/></button>
           </div>
         </div>
       )}
@@ -502,7 +502,7 @@ export default function GeneratePage() {
       {step === 'generate' && (
         <div className="animate-slide-up">
           <div className="flex items-center gap-3 mb-6">
-            <button onClick={() => setStep('preview')} className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
+            <button onClick={() => setStep('names')} className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
               <ChevronLeft size={18}/>
             </button>
             <h2 className="font-display text-xl text-ink-800">Output Options</h2>
@@ -571,7 +571,7 @@ export default function GeneratePage() {
           )}
 
           <div className="flex justify-between">
-            <button onClick={() => setStep('preview')} disabled={generating} className="btn-secondary">
+            <button onClick={() => setStep('names')} disabled={generating} className="btn-secondary">
               <ChevronLeft size={16}/> Back
             </button>
             <button onClick={handleGenerate} disabled={generating}

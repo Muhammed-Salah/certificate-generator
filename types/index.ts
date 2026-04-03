@@ -26,7 +26,7 @@ export interface TextField {
   font_size: number; // px at 1:1 scale
   font_color: string; // hex
   alignment: 'left' | 'center' | 'right';
-  case_transform: 'none' | 'uppercase' | 'lowercase' | 'capitalize' | 'titlecase';
+  case_transform: 'none' | 'uppercase' | 'lowercase' | 'capitalize' | 'titlecase' | 'small-caps';
   max_width: number; // 0–1 fraction
   auto_size: boolean;
 }
