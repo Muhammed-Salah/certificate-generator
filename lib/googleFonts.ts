@@ -63,26 +63,33 @@ export const GOOGLE_FONT_WEIGHTS = [
 /**
  * Dynamically loads a Google Font by injecting a <link> tag.
  */
-export function loadGoogleFont(family: string, weight: number = 400) {
+export function loadGoogleFont(family: string, weight: number = 400, italic: boolean = false) {
   if (typeof window === 'undefined') return;
   
-  const id = `google-font-${family.replace(/\s+/g, '-').toLowerCase()}-${weight}`;
+  const id = `google-font-${family.replace(/\s+/g, '-').toLowerCase()}-${weight}${italic ? '-italic' : ''}`;
   if (document.getElementById(id)) return;
 
   const link = document.createElement('link');
   link.id = id;
   link.rel = 'stylesheet';
-  link.href = `https://fonts.googleapis.com/css2?family=${family.replace(/\s+/g, '+')}:wght@${weight}&display=swap`;
+  const italParam = italic ? 'ital,wght@1,' : 'wght@';
+  link.href = `https://fonts.googleapis.com/css2?family=${family.replace(/\s+/g, '+')}:${italParam}${weight}&display=swap`;
   document.head.appendChild(link);
 }
+
+const FONT_BYTES_CACHE = new Map<string, ArrayBuffer>();
 
 /**
  * Fetches the raw font file bytes for use in PDF generation.
  * Parses Google's CSS API to find the actual .ttf/.woff2 URL.
  */
-export async function fetchGoogleFontBytes(family: string, weight: number = 400): Promise<ArrayBuffer | null> {
+export async function fetchGoogleFontBytes(family: string, weight: number = 400, italic: boolean = false): Promise<ArrayBuffer | null> {
+  const cacheKey = `${family}-${weight}${italic ? '-italic' : ''}`;
+  if (FONT_BYTES_CACHE.has(cacheKey)) return FONT_BYTES_CACHE.get(cacheKey)!;
+
   try {
-    const cssUrl = `https://fonts.googleapis.com/css2?family=${family.replace(/\s+/g, '+')}:wght@${weight}`;
+    const italParam = italic ? 'ital,wght@1,' : 'wght@';
+    const cssUrl = `https://fonts.googleapis.com/css2?family=${family.replace(/\s+/g, '+')}:${italParam}${weight}`;
     const response = await fetch(cssUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
@@ -96,7 +103,10 @@ export async function fetchGoogleFontBytes(family: string, weight: number = 400)
 
     const fontUrl = match[1].replace(/['"]/g, '');
     const fontResponse = await fetch(fontUrl);
-    return await fontResponse.arrayBuffer();
+    const bytes = await fontResponse.arrayBuffer();
+    
+    FONT_BYTES_CACHE.set(cacheKey, bytes);
+    return bytes;
   } catch (e) {
     console.error(`Failed to fetch bytes for Google Font: ${family}`, e);
     return null;

@@ -180,7 +180,7 @@ export default function FontsPage() {
                 The quick brown fox jumps
               </div>
               <button onClick={() => handleDelete(f)}
-                      className="p-2 text-ink-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors flex-shrink-0"
+                      className="p-2 text-ink-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors flex-shrink-0"
                       title="Delete font">
                 <Trash2 size={16}/>
               </button>

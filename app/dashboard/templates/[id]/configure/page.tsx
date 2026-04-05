@@ -8,7 +8,7 @@ import type { Template, TemplateConfig, TextField, RichTextField, CustomTextFiel
 import {
   Save, ArrowLeft, Type, AlignLeft, AlignCenter, AlignRight,
   ChevronDown, Palette, Info, Grid3X3, Magnet, PlusCircle, Trash2,
-  AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter
+  AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter, Loader2
 } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
 import FontPicker from '@/components/FontPicker';
@@ -82,7 +82,30 @@ export default function ConfigurePage() {
   const [selectedElement, setSelectedElement] = useState<DragTarget>(null);
   const [showLimitGuide, setShowLimitGuide]   = useState(false);
   const limitGuideTimer = useRef<NodeJS.Timeout | null>(null);
+  const [showHistoryWarning, setShowHistoryWarning] = useState(false);
+  const [hasHistory, setHasHistory] = useState(false);
   
+  const configErrors = useMemo(() => {
+    const errs: string[] = [];
+    if (nameField.font_size <= 0) errs.push('Name font size must be greater than 0.');
+    if (showDesc && descField.font_size <= 0) errs.push('Description font size must be greater than 0.');
+    
+    const labels = new Set<string>();
+    additionalFields.forEach(f => {
+      const l = f.label.trim();
+      if (!l) errs.push('Custom field labels cannot be empty.');
+      else if (l.toLowerCase() === 'name' || l.toLowerCase() === '{name}') {
+        errs.push(`The label "${l}" is reserved for the recipient name.`);
+      } else if (labels.has(l)) {
+        errs.push(`Duplicate field label found: "${l}". Labels are case-sensitive.`);
+      }
+      labels.add(l);
+      if (f.font_size <= 0) errs.push(`Font size for "${f.label}" must be greater than 0.`);
+    });
+    
+    return errs;
+  }, [nameField, descField, showDesc, additionalFields]);
+
   const centerField = useCallback((axis: 'x' | 'y') => {
     if (!selectedElement) return;
     const val = 0.5;
@@ -150,6 +173,13 @@ export default function ConfigurePage() {
         }
       }
       if (fnts) setFonts(fnts as FontRecord[]);
+
+      // Check if history exists
+      const { count } = await supabase
+        .from('certificate_records')
+        .select('*', { count: 'exact', head: true })
+        .eq('template_id', id);
+      setHasHistory((count || 0) > 0);
     })();
     return () => { cancelled = true; };
   }, [id, supabase]);
@@ -377,13 +407,19 @@ export default function ConfigurePage() {
   }, [selectedElement]);
 
   /* ─── Save ─── */
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (bypassWarning = false) => {
+    if (hasHistory && !bypassWarning) {
+      setShowHistoryWarning(true);
+      return;
+    }
+    
     setSaving(true);
-    const payload: Partial<TemplateConfig> & { template_id: string } = {
+    const payload: any = {
       template_id:       id,
       name_field:        nameField,
       description_field: showDesc ? descField : undefined,
       additional_fields: additionalFields.length > 0 ? additionalFields : undefined,
+      last_version_id:   null, // Clear the version ID to force a new snapshot on next generation
       updated_at:        new Date().toISOString(),
     };
     const { error } = await supabase
@@ -395,7 +431,7 @@ export default function ConfigurePage() {
       window.__unsavedChanges = false;
       setTimeout(() => router.push('/dashboard/templates'), 500); 
     }
-  }, [id, nameField, descField, showDesc, additionalFields, supabase, router]);
+  }, [id, nameField, descField, showDesc, additionalFields, supabase, router, hasHistory]);
 
   const [configTab, setConfigTab] = useState<'main' | 'custom'>('main');
 
@@ -415,7 +451,7 @@ export default function ConfigurePage() {
       <aside className="w-full lg:w-80 xl:w-96 flex-shrink-0 bg-white border-r border-ink-100 overflow-hidden flex flex-col">
         <div className="p-5 border-b border-ink-100 flex items-center gap-3 flex-shrink-0">
           <button onClick={() => router.back()}
-                  className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
+                  className="btn-outline p-2">
             <ArrowLeft size={18}/>
           </button>
           <div className="min-w-0">
@@ -524,10 +560,17 @@ export default function ConfigurePage() {
                       <input 
                         value={field.label}
                         onChange={e => {
-                           setAdditionalFields(p => p.map(f => f.id === field.id ? { ...f, label: e.target.value } : f));
+                           const cleanLabel = e.target.value.replace(/[{}]/g, '');
+                           setAdditionalFields(p => p.map(f => f.id === field.id ? { ...f, label: cleanLabel } : f));
                            window.__unsavedChanges = true;
                         }}
-                        className="font-display text-sm text-ink-900 bg-transparent border-b border-transparent hover:border-ink-200 focus:border-ink-400 focus:outline-none px-1 py-0.5 rounded transition-colors flex-1"
+                        className={`font-display text-sm bg-transparent border-b px-1 py-0.5 rounded transition-colors flex-1 focus:outline-none focus:ring-0 ${
+                          !field.label.trim() || 
+                          field.label.trim().toLowerCase() === 'name' || 
+                          additionalFields.filter(f => f.label.trim() === field.label.trim()).length > 1
+                            ? 'text-red-600 border-red-300 bg-red-50 focus:border-red-500' 
+                            : 'text-ink-900 border-transparent hover:border-ink-200 focus:border-ink-400'
+                        }`}
                         placeholder="Field label"
                       />
                       
@@ -573,7 +616,7 @@ export default function ConfigurePage() {
 
               <button
                 onClick={handleAddCustomField}
-                className="w-full flex items-center justify-center gap-2 p-4 text-xs font-bold uppercase tracking-widest text-ink-700 bg-white hover:bg-ink-950 hover:text-white border-2 border-ink-950 rounded-2xl transition-all shadow-md active:scale-[0.98]"
+                className="w-full btn-outline justify-center py-4 text-xs font-bold"
               >
                 <PlusCircle size={14}/> Add New Custom Field
               </button>
@@ -591,48 +634,99 @@ export default function ConfigurePage() {
         </div>
 
         <div className="p-5 border-t border-ink-100 flex-shrink-0 bg-white">
-          <button onClick={handleSave} disabled={saving}
-                  className={`w-full btn-gold justify-center py-3.5 transition-all shadow-lg active:scale-[0.98] ${saved ? '!bg-green-600 !text-white' : ''}`}>
+          {configErrors.length > 0 && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-100 rounded-xl animate-fade-in-up">
+               <div className="flex items-center gap-2 text-red-600 mb-1">
+                 <Info size={14} />
+                 <span className="text-[11px] font-bold uppercase tracking-tight">Configuration Issues</span>
+               </div>
+               <ul className="list-disc list-inside space-y-0.5">
+                 {configErrors.slice(0, 3).map((err, i) => (
+                   <li key={i} className="text-[10px] text-red-700 leading-tight">{err}</li>
+                 ))}
+                 {configErrors.length > 3 && (
+                   <li className="text-[10px] text-red-700 italic">...and {configErrors.length - 3} more</li>
+                 )}
+               </ul>
+            </div>
+          )}
+
+          <button onClick={() => handleSave()} disabled={saving || configErrors.length > 0} id="btn-save-config"
+                  className={`w-full btn-gold justify-center py-3.5 ${
+                    saved ? '!bg-green-600 !text-white' : 
+                    configErrors.length > 0 ? '!bg-ink-100 !text-ink-300 cursor-not-allowed border-ink-200' : ''
+                  }`}>
             {saving
-              ? <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg> Saving…</>
+              ? <><Loader2 className="animate-spin w-4 h-4" /> Saving…</>
               : saved
               ? <>✓ Configuration Saved</>
+              : configErrors.length > 0
+              ? <>Invalid Configuration</>
               : <><Save size={16}/> Save & Return</>
             }
           </button>
         </div>
       </aside>
 
+      {/* History Warning Modal */}
+      {showHistoryWarning && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-ink-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col p-8 animate-scale-up">
+            <div className="w-16 h-16 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-600 mb-6">
+              <Info size={32} />
+            </div>
+            <h3 className="font-display text-2xl text-ink-900 mb-3">Notice: Existing History</h3>
+            <p className="text-ink-500 text-sm leading-relaxed mb-8">
+              Changing this configuration will create a new version for future certificates. 
+              <span className="block mt-2 font-medium text-ink-700">Previously issued certificates will remain exactly as they were.</span>
+            </p>
+            <div className="flex flex-col gap-3">
+              <button 
+                onClick={() => handleSave(true)}
+                className="btn-primary w-full"
+              >
+                Update Anyway
+              </button>
+              <button 
+                onClick={() => setShowHistoryWarning(false)}
+                className="btn-outline w-full justify-center"
+              >
+                Go back to editing
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ─── Canvas area ─── */
        /* eslint-disable-next-line a11y-click-events-have-key-events */}
       <div className="flex-1 bg-ink-100 overflow-auto flex items-center justify-center p-6" ref={canvasRef}
            onClick={() => setSelectedElement(null)}>
-        <div className="relative canvas-shadow rounded-lg overflow-hidden select-none"
+        <div id="canvas-section" className="relative canvas-shadow rounded-lg overflow-hidden select-none"
              style={{ maxWidth: '100%', maxHeight: '85vh', display: 'inline-block' }}>
 
-          {pdfRendering ? (
+          {!imgLoaded && (
             <div className="w-[800px] h-[566px] bg-white flex flex-col items-center justify-center gap-4 border border-ink-100 rounded-lg shadow-sm">
                <div className="animate-spin w-10 h-10 border-4 border-ink-100 border-t-accent-gold rounded-full" />
                <div className="text-center">
-                 <p className="text-sm text-ink-800 font-bold uppercase tracking-widest">Rendering PDF</p>
-                 <p className="text-[10px] text-ink-400 mt-1 uppercase tracking-tight">Sharpening edges and measuring proportions...</p>
+                 <p className="text-sm text-ink-800 font-bold uppercase tracking-widest tracking-widest">
+                   {template.file_type === 'pdf' ? 'Preparing PDF Canvas' : 'Loading Template'}
+                 </p>
+                 <p className="text-[10px] text-ink-400 mt-1 uppercase tracking-tight">Optimizing view for pin-point precision...</p>
                </div>
             </div>
-          ) : (
-            /* eslint-disable-next-line @next/next/no-img-element */
+          )}
+
+          {imgLoaded && (
             <img
               ref={imgRef}
               src={template.file_type === 'pdf' ? (pdfDataUrl || '') : templateUrl}
               alt={template.name}
-              className="block max-w-full"
+              className="block max-w-full animate-fade-in"
               style={{ maxHeight: '85vh', objectFit: 'contain' }}
               onLoad={e => {
                 const img = e.currentTarget;
                 setImgLoaded(true);
-                // For PNGs we trust the natural dimensions
                 if (template.file_type === 'png') {
                   setImgNatW(img.naturalWidth);
                   setImgNatH(img.naturalHeight);
@@ -640,6 +734,24 @@ export default function ConfigurePage() {
               }}
               draggable={false}
             />
+          )}
+
+          {!imgLoaded && template.file_type !== 'pdf' && (
+             /* Hidden pre-loader to trigger onLoad */
+             <img 
+               src={templateUrl} 
+               className="hidden" 
+               onLoad={() => setImgLoaded(true)} 
+             />
+          )}
+
+          {template.file_type === 'pdf' && pdfDataUrl && !imgLoaded && (
+             /* Hidden PDF pre-loader */
+             <img 
+               src={pdfDataUrl} 
+               className="hidden" 
+               onLoad={() => setImgLoaded(true)} 
+             />
           )}
           
           {/* Max width limits guide */}
@@ -833,7 +945,7 @@ export default function ConfigurePage() {
         </div>
         
         {/* Helper Toolbar in canvas area */}
-        <div className="absolute bottom-6 bg-white rounded-full shadow-strong px-4 py-2 flex items-center gap-4 z-30" onClick={e => e.stopPropagation()}>
+        <div id="alignment-tools" className="absolute bottom-6 bg-white rounded-full shadow-strong px-4 py-2 flex items-center gap-4 z-30" onClick={e => e.stopPropagation()}>
           <div className="flex items-center gap-2">
             <button
               onClick={() => { setShowGrid(p => !p); if (showGrid) setSnapToGrid(false); }}
@@ -842,7 +954,7 @@ export default function ConfigurePage() {
               }`}>
               <Grid3X3 size={14}/> {showGrid ? 'Grid On' : 'Grid Off'}
             </button>
-            <div className={`flex items-center bg-ink-50 rounded border border-ink-200 ml-1 transition-opacity ${!showGrid ? 'opacity-30 pointer-events-none' : ''}`}>
+            <div id="grid-controls" className={`flex items-center bg-ink-50 rounded border border-ink-200 ml-1 transition-opacity ${!showGrid ? 'opacity-30 pointer-events-none' : ''}`}>
               <button disabled={!showGrid || gridSize <= 2}
                       onClick={() => setGridSize(p => Math.max(2, p - 2))}
                       className="px-2 py-0.5 hover:bg-ink-100 disabled:opacity-50 text-ink-700">-</button>
@@ -1073,7 +1185,7 @@ function FieldControls({
 
       {/* Default description content */}
       {'content' in field && (
-        <div className="space-y-2">
+        <div id="description-editor" className="space-y-2">
           <div className="flex items-center justify-between">
             <label className="label mb-0">Default Content</label>
             <div className="flex items-center gap-1.5 text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-bold border border-blue-100">

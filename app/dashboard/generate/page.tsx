@@ -9,8 +9,9 @@ import {
 } from '@/lib/certGen';
 import {
   Award, ChevronRight, Upload, Eye, Download, FileText, FileImage,
-  Users, Trash2, ChevronLeft, PackageOpen, Layers, X,
+  Users, Trash2, ChevronLeft, PackageOpen, Layers, X, PlusCircle, Loader2,
 } from 'lucide-react';
+import Link from 'next/link';
 import Papa from 'papaparse';
 import { loadGoogleFont, POPULAR_GOOGLE_FONTS, fetchGoogleFontBytes } from '@/lib/googleFonts';
 import { extractPlaceholders, normalizePlaceholderData, highlightPlaceholders, stripPlaceholderHighlight } from '@/lib/placeholderUtils';
@@ -19,8 +20,12 @@ type Step      = 'select' | 'names' | 'generate';
 type OutFormat = 'png' | 'pdf';
 type BulkFmt   = 'zip' | 'merged-pdf';
 
+import { useSearchParams } from 'next/navigation';
+
 export default function GeneratePage() {
   const supabase = useMemo(() => createClient(), []);
+  const searchParams = useSearchParams();
+  const templateIdParam = searchParams.get('templateId');
 
   /* ─── Data ─── */
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -31,6 +36,17 @@ export default function GeneratePage() {
   const [step, setStep]         = useState<Step>('select');
   const [selected, setSelected] = useState<Template | null>(null);
   const [config, setConfig]     = useState<TemplateConfig | null>(null);
+  
+  // Handle template pre-selection from URL
+  useEffect(() => {
+    if (!loading && templates.length > 0 && templateIdParam && !selected) {
+      const found = templates.find(t => t.id === templateIdParam);
+      if (found) {
+        handleSelectTemplate(found);
+        setStep('names');
+      }
+    }
+  }, [loading, templates, templateIdParam, selected]);
 
   /* ─── Names ─── */
   const [names, setNames]             = useState<Record<string, string>[]>([{ Name: '' }]);
@@ -41,6 +57,13 @@ export default function GeneratePage() {
   const [outFormat, setOutFormat] = useState<OutFormat>('pdf');
   const [bulkFmt, setBulkFmt]     = useState<BulkFmt>('zip');
 
+  // Logic: PNG doesn't support Merged PDF
+  useEffect(() => {
+    if (outFormat === 'png' && bulkFmt === 'merged-pdf') {
+      setBulkFmt('zip');
+    }
+  }, [outFormat, bulkFmt]);
+
   /* ─── Preview ─── */
   const [previewIdx, setPreviewIdx]       = useState(0);
   const [previewDataUrl, setPreviewDataUrl] = useState<string>('');
@@ -48,6 +71,7 @@ export default function GeneratePage() {
   const previewContainerRef = useRef<HTMLDivElement>(null);
   
   const [focusNew, setFocusNew] = useState(false);
+  const [csvUploaded, setCsvUploaded] = useState(false);
 
   /* ─── Generation ─── */
   const [generating, setGenerating]   = useState(false);
@@ -182,7 +206,7 @@ export default function GeneratePage() {
       const canvas = await renderCertificate({
         name,
         descriptionHtml: descOverride || config.description_field?.content || '',
-        placeholdersData: normalizePlaceholderData(row),
+        placeholdersData: normalizePlaceholderData(row, config?.additional_fields?.map(f => f.label) || []),
         customFieldsData,
         template: selected, config,
         templateImageBitmap: bitmap,
@@ -235,7 +259,7 @@ export default function GeneratePage() {
   const downloadTemplateCsv = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const cols = ['Name', ...placeholders, ...(config?.additional_fields?.map(f => f.label) || [])];
+    const cols = ['Name', ...placeholders, ...(config?.additional_fields?.map(f => f.label.replace(/[{}]/g, '')) || [])];
     const header = cols.join(',');
     const sample = cols.map(c => c === 'Name' ? 'John Doe' : placeholders.includes(c) ? `Sample ${c.replace(/[{}]/g, '')}` : `Sample ${c}`).join(',');
     const blob = new Blob([header + '\n' + sample], { type: 'text/csv' });
@@ -252,64 +276,126 @@ export default function GeneratePage() {
       header: true,
       skipEmptyLines: true,
       complete: res => {
-        const nameKey = res.meta.fields?.find(f => f.toLowerCase() === 'name');
+        const normalize = (s: string) => s.replace(/[{}]/g, '').trim().toLowerCase();
+        
+        const nameKey = res.meta.fields?.find(f => normalize(f) === 'name');
         if (!nameKey) {
             alert('Your CSV must contain a "Name" column header.');
             return;
+        }
+
+        // Verify all required tokens are present in CSV
+        const missing = [];
+        for (const p of placeholders) {
+           const normP = normalize(p);
+           if (!res.meta.fields?.some(f => normalize(f) === normP)) missing.push(p);
+        }
+        for (const f of config?.additional_fields || []) {
+           const normF = normalize(f.label);
+           if (!res.meta.fields?.some(f => normalize(f) === normF)) missing.push(f.label);
+        }
+
+        if (missing.length > 0) {
+          alert(`Your CSV is missing required columns: ${missing.join(', ')}. Please update your CSV or use the template provided.`);
+          return;
         }
         
         const parsed = res.data.map(row => {
            const out: Record<string, string> = { Name: String(row[nameKey] || '') };
            
-           // Map placeholders exactly
+           // Map placeholders flexible
            placeholders.forEach(p => {
-             const col = res.meta.fields?.find(m => m.trim() === p);
+             const normP = normalize(p);
+             const col = res.meta.fields?.find(m => normalize(m) === normP);
              if (col) out[p] = String(row[col] || '');
            });
 
            for (const f of config?.additional_fields || []) {
-               const col = res.meta.fields?.find(m => m.toLowerCase() === f.label.toLowerCase());
-               if (col) out[f.label] = String(row[col] || '');
+               const cleanLabel = f.label.replace(/[{}]/g, '');
+               const col = res.meta.fields?.find(m => normalize(m) === normalize(cleanLabel));
+               if (col) out[cleanLabel] = String(row[col] || '');
            }
            return out;
         }).filter(r => r.Name && String(r.Name).trim());
         
         if (parsed.length > 0) {
+          const incompleteCount = parsed.filter(n => {
+            const hasName = !!n.Name?.trim();
+            const hasPlaceholders = placeholders.every(p => !!n[p]?.trim());
+            const hasAdditional = (config?.additional_fields || []).every(f => !!n[f.label.replace(/[{}]/g, '')]?.trim());
+            return !hasName || !hasPlaceholders || !hasAdditional;
+          }).length;
+
           setNames(parsed);
+          setCsvUploaded(true);
           setPreviewIdx(0);
+
+          if (incompleteCount > 0) {
+            alert(`Imported ${parsed.length} rows, but ${incompleteCount} rows are missing required information. Please fill in the blank fields highlighted in red below.`);
+          }
         } else {
-            alert('No valid names found in the uploaded file.');
+          alert('No valid rows with names were found in your CSV.');
         }
       },
     });
-  }, [config]);
+  }, [config, placeholders]);
 
   /* ─── Generate ─── */
+  const CUSTOM_FONT_CACHE = useRef<Map<string, ArrayBuffer>>(new Map());
+
   const fetchFontBytes = useCallback(async () => {
     if (!config) return {};
-    const used = new Set<{ family: string; weight: number }>();
+    const used = new Set<{ family: string; weight: number; italic?: boolean }>();
+    
+    // 1. Regular fields
     used.add({ family: config.name_field.font_family, weight: config.name_field.font_weight || 400 });
-    if (config.description_field) used.add({ family: config.description_field.font_family, weight: config.description_field.font_weight || 400 });
     (config.additional_fields || []).forEach(f => used.add({ family: f.font_family, weight: f.font_weight || 400 }));
+
+    // 2. Description field (loads multiple weights for rich text)
+    if (config.description_field) {
+      const family = config.description_field.font_family;
+      const baseWeight = config.description_field.font_weight || 400;
+      used.add({ family, weight: baseWeight });
+      
+      // Always fetch Bold (700) for descriptions to support <b> tags
+      used.add({ family, weight: 700 });
+      
+      // Check for Italic tags in content
+      const content = descOverride || config.description_field.content || '';
+      if (content.match(/<i\b|<em>/i)) {
+         used.add({ family, weight: baseWeight, italic: true });
+         used.add({ family, weight: 700, italic: true });
+      }
+    }
     
     const bytesMap: Record<string, ArrayBuffer> = {};
-    for (const { family, weight } of Array.from(used)) {
-       if (!family) continue;
+    for (const { family: rawFamily, weight, italic } of Array.from(used)) {
+       if (!rawFamily) continue;
+       const family = rawFamily.split(',')[0].replace(/['"]/g, '').trim();
        const fRec = fonts.find(f => f.name === family);
-       const key = `${family}-${weight}`;
+       const key = `${family}-${weight}${italic ? '-italic' : ''}`;
+       
+       if (CUSTOM_FONT_CACHE.current.has(key)) {
+         bytesMap[key] = CUSTOM_FONT_CACHE.current.get(key)!;
+         continue;
+       }
 
        if (fRec) {
           const { data, error } = await supabase.storage.from('fonts').download(fRec.file_path);
-          if (data) bytesMap[key] = await data.arrayBuffer();
+          if (data) {
+            const bytes = await data.arrayBuffer();
+            bytesMap[key] = bytes;
+            CUSTOM_FONT_CACHE.current.set(key, bytes);
+          }
           if (error) console.error(`Error downloading font ${family}:`, error);
        } else {
-          // It's a Google Font
-          const bytes = await fetchGoogleFontBytes(family, weight);
+          // Google Fonts handles weights and italics via the standard fetcher
+          const bytes = await fetchGoogleFontBytes(family, weight, italic);
           if (bytes) bytesMap[key] = bytes;
        }
     }
     return bytesMap;
-  }, [config, fonts, supabase]);
+  }, [config, fonts, supabase, descOverride]);
 
   const handleGenerate = useCallback(async () => {
     if (!selected || !config) return;
@@ -318,12 +404,60 @@ export default function GeneratePage() {
     setGenProgress({ done: 0, total: valid.length });
 
     try {
-      const { data: signedData } = await supabase.storage.from('templates').createSignedUrl(selected.file_path, 3600);
-      if (!signedData) throw new Error('Could not get signed URL');
-      const templateUrl = signedData.signedUrl;
-      
-      const bitmap = outFormat === 'png' ? await getBitmap(selected) : null;
-      const fontBytes = outFormat === 'pdf' ? await fetchFontBytes() : {};
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
+      // PREVENT DUPLICATES: If already generated for this session/data, skip DB insert
+      let versionId = config.last_version_id;
+      if (!isGenerated) {
+        const isOverridden = descOverride && descOverride !== (config.description_field?.content || '');
+
+        if (!versionId || isOverridden) {
+          const { data: version, error: vErr } = await supabase
+            .from('template_config_versions')
+            .insert({
+              template_id:     selected.id,
+              config_snapshot: {
+                name_field:        config.name_field,
+                description_field: config.description_field,
+                additional_fields: config.additional_fields,
+                desc_override:     descOverride 
+              }
+            })
+            .select()
+            .single();
+          if (vErr) throw vErr;
+          versionId = version.id;
+
+          if (!isOverridden) {
+            await supabase
+              .from('template_configs')
+              .update({ last_version_id: versionId })
+              .eq('template_id', selected.id);
+          }
+        }
+
+        const batchId = crypto.randomUUID();
+        const records = valid.map(row => ({
+          user_id:           user.id,
+          template_id:       selected.id,
+          config_version_id: versionId,
+          batch_id:          batchId,
+          recipient_name:    row.Name,
+          dynamic_fields:    normalizePlaceholderData(row, config?.additional_fields?.map(f => f.label) || [])
+        }));
+        const { error: rErr } = await supabase.from('certificate_records').insert(records);
+        if (rErr) throw rErr;
+      }
+
+      // 3. Proceed with rendering & download
+      const bitmap = await getBitmap(selected);
+      if (!bitmap) throw new Error('Template image not loaded properly');
+
+      // Native 1x scaling as requested
+      const finalScale = 1.0; 
+
+      const { renderCertificate, canvasToPngBlob, canvasToPdfBlob } = await import('@/lib/certGen');
 
       if (valid.length === 1) {
         const row = valid[0];
@@ -334,42 +468,25 @@ export default function GeneratePage() {
            });
         }
 
-        let resultBlob: Blob;
-        const safeSubName = row.Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+        const canvas = await renderCertificate({
+          name: row.Name,
+          descriptionHtml: descOverride || config.description_field?.content || '',
+          placeholdersData: normalizePlaceholderData(row, config?.additional_fields?.map(f => f.label) || []),
+          customFieldsData,
+          template: selected, config,
+          templateImageBitmap: bitmap,
+          scale: finalScale,
+        });
 
-        if (outFormat === 'pdf') {
-          const { renderFidelityPdf } = await import('@/lib/certGen');
-          const pdfBytes = await renderFidelityPdf({
-            name: row.Name,
-            descriptionHtml: descOverride || config.description_field?.content || '',
-            placeholdersData: normalizePlaceholderData(row),
-            customFieldsData,
-            template: selected, 
-            templateUrl,
-            config,
-            templateImageBitmap: null,
-          }, fontBytes);
-          resultBlob = new Blob([pdfBytes as any], { type: 'application/pdf' });
-        } else {
-          const canvas = await renderCertificate({
-            name: row.Name,
-            descriptionHtml: descOverride || config.description_field?.content || '',
-            placeholdersData: normalizePlaceholderData(row),
-            customFieldsData,
-            template: selected, config,
-            templateImageBitmap: bitmap!,
-            scale: 4, // Ultra high resolution PNG
-          });
-          const { canvasToPngBlob } = await import('@/lib/certGen');
-          resultBlob = await canvasToPngBlob(canvas);
-        }
+        const resultBlob = outFormat === 'pdf' 
+          ? await canvasToPdfBlob(canvas, row.Name)
+          : await canvasToPngBlob(canvas);
         
+        const safeSubName = row.Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
         triggerDownload(resultBlob, `${safeSubName}.${outFormat}`);
         setGenProgress({ done: 1, total: 1 });
       } else {
-        // Bulk generation
         const entries: { name: string; blob: Blob }[] = [];
-        const { renderFidelityPdf, renderCertificate, canvasToPngBlob } = await import('@/lib/certGen');
 
         for (let i = 0; i < valid.length; i++) {
           const row = valid[i];
@@ -380,33 +497,23 @@ export default function GeneratePage() {
              });
           }
 
-          const safeRowName = row.Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+          const canvas = await renderCertificate({
+             name: row.Name,
+             descriptionHtml: descOverride || config.description_field?.content || '',
+             placeholdersData: normalizePlaceholderData(row, config?.additional_fields?.map(f => f.label) || []),
+             customFieldsData,
+             template: selected, config,
+             templateImageBitmap: bitmap,
+             scale: finalScale,
+          });
 
-          if (outFormat === 'pdf') {
-             const pdfBytes = await renderFidelityPdf({
-                name: row.Name,
-                descriptionHtml: descOverride || config.description_field?.content || '',
-                placeholdersData: normalizePlaceholderData(row),
-                customFieldsData,
-                template: selected, 
-                templateUrl,
-                config,
-                templateImageBitmap: null,
-             }, fontBytes);
-             entries.push({ name: `${safeRowName}.${outFormat}`, blob: new Blob([pdfBytes as any], { type: 'application/pdf' }) });
-          } else {
-             const canvas = await renderCertificate({
-                name: row.Name,
-                descriptionHtml: descOverride || config.description_field?.content || '',
-                placeholdersData: normalizePlaceholderData(row),
-                customFieldsData,
-                template: selected, config,
-                templateImageBitmap: bitmap!,
-                scale: 4,
-             });
-             const blob = await canvasToPngBlob(canvas);
-             entries.push({ name: `${safeRowName}.${outFormat}`, blob });
-          }
+          const blob = outFormat === 'pdf' 
+             ? await canvasToPdfBlob(canvas, row.Name)
+             : await canvasToPngBlob(canvas);
+          
+          const safeRowName = row.Name.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s/g, '_');
+          entries.push({ name: `${safeRowName}.${outFormat}`, blob });
+          
           setGenProgress({ done: i + 1, total: valid.length });
           await new Promise(r => setTimeout(r, 0));
         }
@@ -433,10 +540,38 @@ export default function GeneratePage() {
     } finally {
       setGenerating(false);
     }
-  }, [selected, config, names, outFormat, bulkFmt, descOverride, getBitmap]);
+  }, [selected, config, names, outFormat, bulkFmt, descOverride, getBitmap, supabase]);
 
   /* ─── Helpers ─── */
-  const validNames = useMemo(() => names.filter(n => n.Name?.trim()), [names]);
+  const isNamesValid = useMemo(() => {
+    if (names.length === 0) return false;
+    return names.every(n => {
+      // 1. Name is always required
+      if (!n.Name?.trim()) return false;
+      
+      // 2. Tokens are required
+      for (const p of placeholders) {
+        if (!n[p]?.trim()) return false;
+      }
+      
+      // 3. Additional fields are required
+      for (const f of config?.additional_fields || []) {
+        const clean = f.label.replace(/[{}]/g, '');
+        if (!n[clean]?.trim()) return false;
+      }
+      
+      return true;
+    });
+  }, [names, placeholders, config]);
+
+  const validNames = useMemo(() => {
+    return names.filter(n => {
+      const hasName = !!n.Name?.trim();
+      const hasPlaceholders = placeholders.every(p => !!n[p]?.trim());
+      const hasAdditional = (config?.additional_fields || []).every(f => !!n[f.label.replace(/[{}]/g, '')]?.trim());
+      return hasName && hasPlaceholders && hasAdditional;
+    });
+  }, [names, placeholders, config]);
 
   const getThumb = useCallback((t: Template) => {
     if (t.file_type !== 'png') return null;
@@ -464,10 +599,10 @@ export default function GeneratePage() {
           <div key={s.key} className="flex items-center gap-1 flex-shrink-0">
             <button
               onClick={() => { if (i < stepIdx) setStep(s.key); }}
-              disabled={i > stepIdx}
+              disabled={i > stepIdx || (s.key === 'generate' && !isNamesValid)}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
                 s.key === step      ? 'bg-ink-900 text-parchment-100'
-                : i < stepIdx      ? 'bg-ink-100 text-ink-600 hover:bg-ink-200 cursor-pointer'
+                : (i < stepIdx && (s.key !== 'generate' || isNamesValid)) ? 'bg-ink-100 text-ink-600 hover:bg-ink-200 cursor-pointer'
                 : 'bg-ink-50 text-ink-300 cursor-not-allowed'
               }`}>
               <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
@@ -504,12 +639,25 @@ export default function GeneratePage() {
               ))}
             </div>
           ) : templates.length === 0 ? (
-            <div className="text-center py-16 card">
-              <Award size={40} className="text-ink-200 mx-auto mb-4"/>
-              <p className="text-ink-500 text-sm">No templates found. Upload one in the Templates section.</p>
+            <div className="text-center py-16 card flex flex-col items-center gap-4 bg-ink-50/50 border-dashed">
+              <div className="w-16 h-16 bg-accent-gold/10 rounded-2xl flex items-center justify-center text-accent-gold mb-2">
+                <FileImage size={32} />
+              </div>
+              <div className="max-w-xs mx-auto space-y-2">
+                <h3 className="text-lg font-display font-medium text-ink-900">No Templates Found</h3>
+                <p className="text-ink-500 text-sm">You need at least one template to start generating certificates.</p>
+              </div>
+              <Link
+                href="/dashboard/templates?action=upload"
+                className="btn-primary mt-4 inline-flex items-center gap-2 group"
+              >
+                <PlusCircle size={18}/>
+                Upload Your First Template
+                <ChevronRight size={16} className="transition-transform group-hover:translate-x-1" />
+              </Link>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div id="template-selection" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {templates.map(t => {
                 const thumb = getThumb(t);
                 const isSel = selected?.id === t.id;
@@ -528,7 +676,7 @@ export default function GeneratePage() {
                         </div>
                       )}
                     </div>
-                    <div className="p-3">
+                    <div className="p-4 bg-white">
                       <p className="font-medium text-ink-800 text-sm truncate">{t.name}</p>
                       <p className="text-xs text-ink-400">{t.file_type.toUpperCase()} · {t.width}×{t.height}</p>
                     </div>
@@ -544,7 +692,7 @@ export default function GeneratePage() {
             <button
               onClick={() => setStep('names')}
               disabled={!selected || !config}
-              className="ml-auto btn-primary disabled:opacity-40 disabled:cursor-not-allowed">
+              className="ml-auto btn-primary">
               Continue <ChevronRight size={16}/>
             </button>
           </div>
@@ -555,7 +703,7 @@ export default function GeneratePage() {
       {step === 'names' && (
         <div className="animate-slide-up">
           <div className="flex items-center gap-3 mb-6">
-            <button onClick={() => setStep('select')} className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors">
+            <button onClick={() => setStep('select')} className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-xl transition-colors">
               <ChevronLeft size={18}/>
             </button>
             <h2 className="font-display text-xl text-ink-800">Add Names & Preview</h2>
@@ -563,7 +711,7 @@ export default function GeneratePage() {
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Left Column: Data Entry */}
-            <div className="lg:col-span-5 space-y-4">
+            <div id="data-input-section" className="lg:col-span-5 space-y-4">
               {/* Manual entry */}
               <div className="card p-5">
                 <div className="flex items-center gap-2 mb-4">
@@ -576,7 +724,7 @@ export default function GeneratePage() {
                       <div className="flex items-center gap-2">
                         <input
                           ref={el => { if (focusNew && i === names.length - 1 && el && document.activeElement !== el) { el.focus(); setFocusNew(false); } }}
-                          className="input flex-1 py-1.5 text-sm"
+                          className={`input flex-1 py-1.5 text-sm ${!n.Name?.trim() ? 'border-red-300' : ''}`}
                           placeholder="Name (Required)"
                           value={n.Name || ''}
                           onChange={e => {
@@ -602,7 +750,7 @@ export default function GeneratePage() {
                            {placeholders.map(p => (
                              <input 
                                key={p}
-                               className="input py-1.5 text-xs bg-white border-blue-100 focus:border-blue-300"
+                               className={`input py-1.5 text-xs bg-white ${!n[p]?.trim() ? 'border-red-300' : 'border-blue-100 focus:border-blue-300'}`}
                                placeholder={p}
                                value={n[p] || ''}
                                onChange={e => {
@@ -612,26 +760,34 @@ export default function GeneratePage() {
                                }}
                              />
                            ))}
-                           {config?.additional_fields?.map(f => (
-                             <input 
-                               key={f.id}
-                               className="input py-1.5 text-xs bg-white"
-                               placeholder={f.label}
-                               value={n[f.label] || ''}
-                               onChange={e => {
-                                 const next = [...names];
-                                 next[i] = { ...next[i], [f.label]: e.target.value };
-                                 setNames(next);
-                               }}
-                             />
-                           ))}
+                           {config?.additional_fields?.map(f => {
+                             const cleanLabel = f.label.replace(/[{}]/g, '');
+                             return (
+                               <input 
+                                 key={f.id}
+                                 className={`input py-1.5 text-xs bg-white ${!n[cleanLabel]?.trim() ? 'border-red-300' : ''}`}
+                                 placeholder={cleanLabel}
+                                 value={n[cleanLabel] || ''}
+                                 onChange={e => {
+                                   const next = [...names];
+                                   next[i] = { ...next[i], [cleanLabel]: e.target.value };
+                                   setNames(next);
+                                 }}
+                               />
+                             );
+                           })}
                         </div>
                       )}
                     </div>
                   ))}
                 </div>
-                <button onClick={() => { setNames(p => [...p, { Name: '' }]); setFocusNew(true); }}
-                        className="mt-3 text-sm text-ink-500 hover:text-ink-800 transition-colors focus:outline-none">
+                <button 
+                  onClick={() => { setNames(p => [...p, { Name: '' }]); setFocusNew(true); setCsvUploaded(false); }}
+                  disabled={csvUploaded}
+                  className={`mt-3 text-sm transition-colors focus:outline-none ${
+                    csvUploaded ? 'text-ink-300 opacity-30 cursor-not-allowed' : 'text-ink-500 hover:text-ink-800'
+                  }`}
+                >
                   + Add another recipient
                 </button>
               </div>
@@ -647,34 +803,67 @@ export default function GeneratePage() {
                     Download Template
                   </button>
                 </div>
-                <label className="block border-2 border-dashed border-ink-200 rounded-xl p-4 text-center cursor-pointer
-                                 hover:border-ink-300 hover:bg-parchment-50 transition-all duration-200">
-                  <Upload size={20} className="text-ink-400 mx-auto mb-2"/>
-                  <p className="text-sm text-ink-600 font-medium">Drop CSV or click to browse</p>
-                  <div className="text-xs text-ink-400 mt-2 flex flex-wrap items-center justify-center gap-1">
-                    Columns required: <span className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">Name</span>
-                    {placeholders.map(p => (
-                       <span key={p} className="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded shadow-sm border border-blue-100">{p}</span>
-                    ))}
-                    {config?.additional_fields?.map(f => (
-                       <span key={f.id} className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">{f.label}</span>
-                    ))}
+                {!csvUploaded ? (
+                  <label className="block border-2 border-dashed border-ink-200 rounded-xl p-4 text-center cursor-pointer hover:border-ink-300 hover:bg-parchment-50 transition-all duration-200">
+                    <Upload size={20} className="text-ink-400 mx-auto mb-2"/>
+                    <p className="text-sm text-ink-600 font-medium">Drop CSV or click to browse</p>
+                    <div className="text-xs text-ink-400 mt-2 flex flex-wrap items-center justify-center gap-1">
+                      Columns required: <span className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">Name</span>
+                      {placeholders.map(p => (
+                         <span key={p} className="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded shadow-sm border border-blue-100">{p}</span>
+                      ))}
+                      {config?.additional_fields?.map(f => (
+                         <span key={f.id} className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">{f.label}</span>
+                      ))}
+                    </div>
+                    <input type="file" accept=".csv" className="hidden"
+                           onChange={e => { if (e.target.files?.[0]) handleCsvUpload(e.target.files[0]); }}/>
+                  </label>
+                ) : (
+                  <div className="bg-green-50 border border-green-100 rounded-xl p-4 flex flex-col items-center gap-2 animate-scale-in">
+                    <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center text-white shadow-sm">
+                      <Award size={20} />
+                    </div>
+                    <p className="text-sm font-bold text-green-800">CSV Uploaded Successfully</p>
+                    <button 
+                      onClick={() => {
+                        setCsvUploaded(false);
+                        setNames([{ Name: '' }]);
+                        setPreviewIdx(0);
+                      }}
+                      className="text-[10px] text-green-600 font-bold uppercase tracking-wider hover:text-green-800 transition-colors"
+                    >
+                      Change File
+                    </button>
+                    {validNames.length >= 1 && (
+                      <p className="text-[11px] text-green-600/80 font-medium italic">
+                        {validNames.length} {validNames.length === 1 ? 'name' : 'names'} ready
+                      </p>
+                    )}
                   </div>
-                  <input type="file" accept=".csv" className="hidden"
-                         onChange={e => { if (e.target.files?.[0]) handleCsvUpload(e.target.files[0]); }}/>
-                </label>
-                {validNames.length > 1 && (
-                  <p className="mt-3 text-xs text-green-700 font-medium">✓ {validNames.length} names loaded</p>
                 )}
               </div>
 
               {/* Description override */}
               {config?.description_field && (
                 <div className="card p-5">
-                  <div className="flex items-center gap-2 mb-3">
-                    <FileText size={16} className="text-ink-500"/>
-                    <h3 className="font-medium text-ink-700 text-sm">Description</h3>
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <div className="flex items-center gap-2">
+                       <FileText size={16} className="text-ink-500"/>
+                       <h3 className="font-medium text-ink-700 text-sm">Description</h3>
+                    </div>
+                    <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                      Fixed Token Structure
+                    </span>
                   </div>
+                  
+                  {error && error.includes('token') && (
+                    <div className="mb-3 p-2 bg-red-50 border border-red-100 rounded-lg flex items-start gap-2 animate-shake">
+                      <div className="text-red-500 mt-0.5">⚠️</div>
+                      <p className="text-xs text-red-600 font-medium leading-relaxed">{error}</p>
+                    </div>
+                  )}
+
                   <div
                     contentEditable suppressContentEditableWarning
                     className="rich-editor input rounded-lg p-3 min-h-[60px]"
@@ -683,8 +872,25 @@ export default function GeneratePage() {
                     onInput={e => {
                       const el = e.target as HTMLDivElement;
                       const html = el.innerHTML;
+                      
                       const clean = stripPlaceholderHighlight(html);
-                      if (descOverride !== clean) setDescOverride(clean);
+                      const currentTokens = extractPlaceholders(clean);
+                      const originalHtml = config?.description_field?.content || '';
+                      const requiredTokens = extractPlaceholders(originalHtml);
+                      
+                      const isMissing = requiredTokens.some(t => !currentTokens.includes(t));
+                      const isExtra   = currentTokens.some(t => !requiredTokens.includes(t));
+
+                      if (isMissing || isExtra) {
+                        setError('Placeholder tokens (e.g. {Name}) cannot be added or deleted. Please restore the original structure.');
+                        el.innerHTML = highlightPlaceholders(descOverride);
+                        return;
+                      }
+
+                      if (descOverride !== clean) {
+                        setDescOverride(clean);
+                        setError('');
+                      }
 
                       const selection = window.getSelection();
                       if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return;
@@ -757,9 +963,8 @@ export default function GeneratePage() {
             </div>
 
             {/* Right Column: Preview */}
-            <div className="lg:col-span-7 flex flex-col">
-              <div ref={previewContainerRef}
-                   className="relative bg-ink-100 rounded-2xl overflow-hidden flex-1 flex flex-col items-center justify-center p-4 min-h-[400px]">
+            <div id="preview-section" className="lg:col-span-7 flex flex-col">
+              <div ref={previewContainerRef} className="relative bg-ink-100 rounded-2xl overflow-hidden flex-1 flex flex-col items-center justify-center p-4 min-h-[400px]">
                 
                 {validNames.length > 1 && (
                   <div className="absolute top-4 left-4 right-4 flex items-center justify-between text-ink-500 text-sm px-3 py-2 bg-white/80 backdrop-blur rounded-lg shadow-sm z-10">
@@ -799,13 +1004,17 @@ export default function GeneratePage() {
             </div>
           </div>
 
-          <div className="mt-6 flex justify-between">
-            <button onClick={() => setStep('select')} className="btn-secondary"><ChevronLeft size={16}/> Default Configs</button>
-            <button onClick={() => setStep('generate')}
-                    disabled={validNames.length === 0}
-                    className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed">
-              Configure Output <ChevronRight size={16}/>
+          <div className="mt-6 flex items-center justify-between">
+            <button onClick={() => setStep('select')} className="btn-outline">
+              <ChevronLeft size={16}/> Back
             </button>
+            <div className="flex flex-col items-end gap-2">
+              <button onClick={() => setStep('generate')}
+                      disabled={!isNamesValid}
+                      className={`btn-primary ${!isNamesValid ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                Configure Output <ChevronRight size={16}/>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -840,11 +1049,14 @@ export default function GeneratePage() {
                 <h3 className="font-medium text-ink-700 text-sm mb-3">Bulk Download</h3>
                 <div className="flex gap-2">
                   {([
-                    ['zip',        'ZIP Archive', PackageOpen],
-                    ['merged-pdf', 'Merged PDF',  Layers],
-                  ] as const).map(([v, label, Icon]) => (
-                    <button key={v} onClick={() => setBulkFmt(v as BulkFmt)}
+                    ['zip',        'ZIP Archive', PackageOpen, false],
+                    ['merged-pdf', 'Merged PDF',  Layers,      outFormat === 'png'],
+                  ] as const).map(([v, label, Icon, disabled]) => (
+                    <button key={v} 
+                            onClick={() => !disabled && setBulkFmt(v as BulkFmt)}
+                            disabled={disabled}
                             className={`flex-1 py-3 px-2 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${
+                              disabled ? 'opacity-30 cursor-not-allowed grayscale' :
                               bulkFmt === v ? 'border-ink-900 bg-ink-900 text-parchment-100' : 'border-ink-200 text-ink-500 hover:border-ink-300'
                             }`}>
                       <Icon size={18}/>
@@ -883,17 +1095,13 @@ export default function GeneratePage() {
           )}
 
           <div className="flex justify-between">
-            <button onClick={() => setStep('names')} disabled={generating} className="btn-secondary">
+            <button onClick={() => setStep('names')} disabled={generating} className="btn-outline">
               <ChevronLeft size={16}/> Back
             </button>
-            <button onClick={handleGenerate} disabled={generating}
-                    className="btn-gold font-medium px-8 py-3 text-sm disabled:opacity-60 disabled:cursor-not-allowed">
+            <button onClick={handleGenerate} disabled={generating} className="btn-gold">
               {generating
-                ? <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                  </svg> Generating…</>
-                : <><Download size={16}/> Generate &amp; Download</>
+                ? <><Loader2 className="animate-spin w-4 h-4" /> Generating…</>
+                : <><Download size={16}/> Generate & Download</>
               }
             </button>
           </div>

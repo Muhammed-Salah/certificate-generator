@@ -14,6 +14,22 @@ function hexToRgb(hex: string) {
   } : { r: 0, g: 0, b: 0 };
 }
 
+const cleanFontFamily = (family: string) => {
+  if (!family) return '';
+  return family.split(',')[0].replace(/['"]/g, '').trim();
+};
+
+// Map common system fonts to standard PDF fonts
+const standardFontMap: Record<string, string> = {
+  'Arial': StandardFonts.Helvetica,
+  'Helvetica': StandardFonts.Helvetica,
+  'Times New Roman': StandardFonts.TimesRoman,
+  'Times': StandardFonts.TimesRoman,
+  'Courier New': StandardFonts.Courier,
+  'Courier': StandardFonts.Courier,
+  'Georgia': StandardFonts.TimesRoman, // Closest standard fallback
+};
+
 export function applyCase(text: string, transform: TextField['case_transform']): string {
   switch (transform) {
     case 'uppercase':  return text.toUpperCase();
@@ -51,7 +67,8 @@ interface RenderOptions {
   placeholdersData?: Record<string, string>;
   customFieldsData?: Record<string, string>;
   template: Template;
-  templateUrl?: string; // Full public Supabase URL for native PDF manipulation
+  templateUrl?: string; // Full public Supabase URL
+  templateBytes?: ArrayBuffer; // Pre-fetched bytes to avoid redundant network calls
   config: TemplateConfig;
   templateImageBitmap: ImageBitmap | null; // Null if using fidelityPdf path
   scale?: number; // output scale multiplier (default 1)
@@ -62,20 +79,24 @@ interface RenderOptions {
  * Preserves original quality by drawing on top of template objects.
  */
 export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<string, ArrayBuffer>): Promise<Uint8Array> {
-  const { name, descriptionHtml, placeholdersData, customFieldsData, template, config, templateUrl } = opts;
+  const { name, descriptionHtml, placeholdersData, customFieldsData, template, config, templateUrl, templateBytes } = opts;
   
-  if (!templateUrl) throw new Error('templateUrl is required for native PDF manipulation');
+  if (!templateUrl && !templateBytes) throw new Error('templateUrl or templateBytes is required');
   
-  // Load original template bytes
-  const response = await fetch(templateUrl);
-  const templateBytes = await response.arrayBuffer();
+  // Load template bytes: use provided buffer or fetch if missing
+  let bytes = templateBytes;
+  if (!bytes && templateUrl) {
+    const response = await fetch(templateUrl);
+    bytes = await response.arrayBuffer();
+  }
+  if (!bytes) throw new Error('Failed to load template bytes');
   
   let pdfDoc: PDFDocument;
   let page;
   let width: number, height: number;
 
   if (template.file_type === 'pdf') {
-     pdfDoc = await PDFDocument.load(templateBytes);
+     pdfDoc = await PDFDocument.load(bytes);
      page = pdfDoc.getPages()[0];
      const size = page.getSize();
      width = size.width;
@@ -85,9 +106,9 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
      // Check for PNG or JPG
      let img;
      try {
-       img = await pdfDoc.embedPng(templateBytes);
+       img = await pdfDoc.embedPng(bytes);
      } catch (e) {
-       img = await pdfDoc.embedJpg(templateBytes);
+       img = await pdfDoc.embedJpg(bytes);
      }
      page = pdfDoc.addPage([img.width, img.height]);
      page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
@@ -97,68 +118,97 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
 
   pdfDoc.registerFontkit(fontkit);
   
-  // Embed fonts
+  // Embed all fonts provided in the map (ensures bold/italic variants are registered)
   const embeddedFonts: Record<string, PDFFont> = {};
-  const neededFonts = new Set<{ family: string; weight: number }>();
-  neededFonts.add({ family: config.name_field.font_family,     weight: config.name_field.font_weight || 400 });
-  if (config.description_field) {
-    neededFonts.add({ family: config.description_field.font_family, weight: config.description_field.font_weight || 400 });
-  }
-  (config.additional_fields || []).forEach((f: TextField) => {
-    neededFonts.add({ family: f.font_family, weight: f.font_weight || 400 });
-  });
-
-  for (const { family, weight } of Array.from(neededFonts)) {
-    const key = `${family}-${weight}`;
-    if (fontBytes[key]) {
-      embeddedFonts[key] = await pdfDoc.embedFont(fontBytes[key]);
-    } else if (fontBytes[family]) {
-      embeddedFonts[key] = await pdfDoc.embedFont(fontBytes[family]);
-    } else {
-      // Try to fetch Google Font on the fly if not provided
-      const bytes = await fetchGoogleFontBytes(family, weight);
-      if (bytes) {
-        embeddedFonts[key] = await pdfDoc.embedFont(bytes);
-      }
+  for (const [key, bytes] of Object.entries(fontBytes)) {
+    try {
+      embeddedFonts[key] = await pdfDoc.embedFont(bytes);
+    } catch (e) {
+      console.error(`Failed to embed font variant: ${key}`, e);
     }
   }
   const standardFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-  const getFont = (family: string, weight?: number) => {
-    const key = `${family}-${weight || 400}`;
-    return embeddedFonts[key] || embeddedFonts[family] || standardFont;
+  const getFont = (family: string, weight?: number, italic?: boolean) => {
+    const clean = cleanFontFamily(family);
+    const key = `${clean}-${weight || 400}${italic ? '-italic' : ''}`;
+    
+    // Check embedded fonts first
+    if (embeddedFonts[key]) return embeddedFonts[key];
+    if (embeddedFonts[clean]) return embeddedFonts[clean];
+
+    // Check standard PDF font map
+    const standardName = standardFontMap[clean];
+    if (standardName) return pdfDoc.embedStandardFont(standardName as any);
+
+    return standardFont;
+  };
+
+  const drawStyledText = (page: any, text: string, x: number, y: number, size: number, font: PDFFont, color: any, alignment: string, maxWidth: number, caseTransform?: string) => {
+    const isSmallCaps = caseTransform === 'small-caps';
+    const cleanText = isSmallCaps ? text : applyCase(text, caseTransform as any);
+    
+    // For small-caps, we need manual horizontal positioning
+    if (isSmallCaps) {
+      let totalW = 0;
+      for (let i = 0; i < cleanText.length; i++) {
+        const char = cleanText[i];
+        const isLower = char === char.toLowerCase() && char !== char.toUpperCase();
+        const charFont = font;
+        const charSize = isLower ? size * 0.82 : size;
+        totalW += charFont.widthOfTextAtSize(isLower ? char.toUpperCase() : char, charSize);
+      }
+      
+      let cursorX = x;
+      if (alignment === 'center') cursorX -= totalW / 2;
+      else if (alignment === 'right') cursorX -= totalW;
+
+      for (let i = 0; i < cleanText.length; i++) {
+        const char = cleanText[i];
+        const isLower = char === char.toLowerCase() && char !== char.toUpperCase();
+        const displayChar = isLower ? char.toUpperCase() : char;
+        const charSize = isLower ? size * 0.82 : size;
+        
+        page.drawText(displayChar, {
+          x: cursorX,
+          y: isLower ? y + (size * 0.02) : y, // Slight lift for small-caps alignment
+          size: charSize,
+          font,
+          color,
+        });
+        cursorX += font.widthOfTextAtSize(displayChar, charSize);
+      }
+      return;
+    }
+
+    // Standard rendering
+    const textWidth = font.widthOfTextAtSize(cleanText, size);
+    let tx = x;
+    if (alignment === 'center') tx -= textWidth / 2;
+    else if (alignment === 'right') tx -= textWidth;
+
+    page.drawText(cleanText, { x: tx, y, size, font, color });
   };
 
   /* ─── Name field ─── */
   const nf = config.name_field;
-  const displayName = applyCase(name.trim(), nf.case_transform);
   const font = getFont(nf.font_family, nf.font_weight);
   const color = hexToRgb(nf.font_color);
-  
-  let fontSize = nf.font_size * 0.75; // Convert px to pt approx
+  let fontSize = nf.font_size * 0.75;
   const nx = nf.x * width;
-  const ny = height - (nf.y * height); // PDF coordinates are bottom-up
+  const ny = height - (nf.y * height);
   const maxW = nf.max_width * width;
 
   if (nf.auto_size) {
-    let currentW = font.widthOfTextAtSize(displayName, fontSize);
+    let currentW = font.widthOfTextAtSize(applyCase(name, nf.case_transform), fontSize);
     while (currentW > maxW && fontSize > 6) {
       fontSize -= 0.5;
-      currentW = font.widthOfTextAtSize(displayName, fontSize);
+      currentW = font.widthOfTextAtSize(applyCase(name, nf.case_transform), fontSize);
     }
   }
 
-  let textX = nx;
-  if (nf.alignment === 'center') textX -= font.widthOfTextAtSize(displayName, fontSize) / 2;
-  else if (nf.alignment === 'right') textX -= font.widthOfTextAtSize(displayName, fontSize);
-
-  page.drawText(displayName, {
-    x: textX,
-    y: ny - (fontSize / 4), // Visual vertical middle adjustment
-    size: fontSize,
-    font,
-    color: rgb(color.r, color.g, color.b),
-  });
+  const verticalOffset = font.heightAtSize(fontSize) / 4; 
+  drawStyledText(page, name, nx, ny - verticalOffset, fontSize, font, rgb(color.r, color.g, color.b), nf.alignment, maxW, nf.case_transform);
 
   /* ─── Additional custom fields ─── */
   if (config.additional_fields && customFieldsData) {
@@ -166,7 +216,6 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
       const val = customFieldsData[field.id] || '';
       if (!val.trim()) continue;
 
-      const dispVal = applyCase(val.trim(), field.case_transform);
       const fFont = getFont(field.font_family, field.font_weight);
       const fColor = hexToRgb(field.font_color);
       let fSize = field.font_size * 0.75;
@@ -175,17 +224,12 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
       const fkMaxW = field.max_width * width;
 
       if (field.auto_size) {
-        let cw = fFont.widthOfTextAtSize(dispVal, fSize);
-        while (cw > fkMaxW && fSize > 6) { fSize -= 0.5; cw = fFont.widthOfTextAtSize(dispVal, fSize); }
+        let cw = fFont.widthOfTextAtSize(applyCase(val, field.case_transform), fSize);
+        while (cw > fkMaxW && fSize > 6) { fSize -= 0.5; cw = fFont.widthOfTextAtSize(applyCase(val, field.case_transform), fSize); }
       }
 
-      let tx = fx;
-      if (field.alignment === 'center') tx -= fFont.widthOfTextAtSize(dispVal, fSize) / 2;
-      else if (field.alignment === 'right') tx -= fFont.widthOfTextAtSize(dispVal, fSize);
-
-      page.drawText(dispVal, {
-        x: tx, y: fy - (fSize / 4), size: fSize, font: fFont, color: rgb(fColor.r, fColor.g, fColor.b),
-      });
+      const vOffset = fFont.heightAtSize(fSize) / 4;
+      drawStyledText(page, val, fx, fy - vOffset, fSize, fFont, rgb(fColor.r, fColor.g, fColor.b), field.alignment, fkMaxW, field.case_transform);
     }
   }
 
@@ -196,13 +240,11 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
      const dFontSize = df.font_size * 0.75;
 
      const finalHtml = placeholdersData 
-        ? replacePlaceholders(descriptionHtml, placeholdersData) 
-        : descriptionHtml;
+        ? replacePlaceholders(descriptionHtml, placeholdersData, name) 
+        : replacePlaceholders(descriptionHtml, {}, name);
 
      const dColor = hexToRgb(df.font_color);
-     const dFont = getFont(df.font_family, df.font_weight);
      const lineH = dFontSize * 1.35;
-
      const fragments = parseHtmlToFragments(finalHtml);
      
      interface StyledLine {
@@ -219,10 +261,11 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
          currentLine = { width: 0, items: [] };
          return;
        }
+       const fragFont = getFont(df.font_family, frag.bold ? 700 : df.font_weight, frag.italic);
        const words = frag.text.split(/(\s+)/);
        words.forEach(word => {
          if (!word) return;
-         const w = dFont.widthOfTextAtSize(word, dFontSize);
+         const w = fragFont.widthOfTextAtSize(word, dFontSize);
          if (currentLine.width + w > dBoxW && currentLine.items.length > 0 && word.trim()) {
            lines.push(currentLine);
            currentLine = { width: 0, items: [] };
@@ -248,22 +291,26 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
         if (df.alignment === 'center') lx += (dBoxW - line.width) / 2;
         else if (df.alignment === 'right') lx += (dBoxW - line.width);
 
-        const ly = startY - (i * lineH) - dFontSize;
+        const lineTop = startY - (i * lineH);
+        const baseHeight = getFont(df.font_family, df.font_weight).heightAtSize(dFontSize);
+        const ly = lineTop - baseHeight * 0.8;
 
         line.items.forEach(item => {
+           const itemFont = getFont(df.font_family, item.bold ? 700 : df.font_weight, item.italic);
            page.drawText(item.text, {
              x: lx,
              y: ly,
              size: dFontSize,
-             font: dFont,
+             font: itemFont,
              color: rgb(dColor.r, dColor.g, dColor.b),
            });
            
            if (item.underline) {
+              const borderThickness = Math.max(0.5, dFontSize / 15);
               page.drawLine({
-                start: { x: lx, y: ly - 2 },
-                end: { x: lx + item.width, y: ly - 2 },
-                thickness: dFontSize / 15,
+                start: { x: lx, y: ly - 1.5 },
+                end: { x: lx + item.width, y: ly - 1.5 },
+                thickness: borderThickness,
                 color: rgb(dColor.r, dColor.g, dColor.b),
               });
            }
@@ -424,8 +471,8 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
     const rawHtml = (descriptionHtml || df.content || '').trim();
     if (rawHtml) {
       const currentHtml = placeholdersData 
-        ? replacePlaceholders(rawHtml, placeholdersData) 
-        : rawHtml;
+        ? replacePlaceholders(rawHtml, placeholdersData, name) 
+        : replacePlaceholders(rawHtml, {}, name);
       const dLeft  = (df.x - df.width / 2) * W;
       const dy     = df.y * H;
       const dw     = df.width  * W;
@@ -612,9 +659,6 @@ export function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
-/**
- * Convert canvas to PDF Blob using jsPDF.
- */
 export async function canvasToPdfBlob(canvas: HTMLCanvasElement, _filename: string): Promise<Blob> {
   const { jsPDF } = await import('jspdf');
   const W  = canvas.width;
@@ -623,9 +667,10 @@ export async function canvasToPdfBlob(canvas: HTMLCanvasElement, _filename: stri
   // Use pt units: 1px = 0.75pt at 96dpi
   const ptW = W * 0.75;
   const ptH = H * 0.75;
-  const pdf = new jsPDF({ orientation: or, unit: 'pt', format: [ptW, ptH] });
-  const dataUrl = canvas.toDataURL('image/png', 1.0);
-  pdf.addImage(dataUrl, 'PNG', 0, 0, ptW, ptH, undefined, 'FAST');
+  const pdf = new jsPDF({ orientation: or, unit: 'pt', format: [ptW, ptH], compress: true });
+  
+  // DIRECT INJECTION: Passing the canvas directly avoids expensive toDataURL encoding
+  pdf.addImage(canvas, 'JPEG', 0, 0, ptW, ptH, undefined, 'MEDIUM');
   return pdf.output('blob');
 }
 
@@ -640,12 +685,12 @@ export async function canvasesToMergedPdf(canvases: HTMLCanvasElement[]): Promis
   const W = first.width, H = first.height;
   const or = W > H ? 'l' : 'p';
   const ptW = W * 0.75, ptH = H * 0.75;
-  const pdf = new jsPDF({ orientation: or, unit: 'pt', format: [ptW, ptH] });
+  const pdf = new jsPDF({ orientation: or, unit: 'pt', format: [ptW, ptH], compress: true });
 
   for (let i = 0; i < canvases.length; i++) {
     if (i > 0) pdf.addPage([ptW, ptH], or);
-    const dataUrl = canvases[i].toDataURL('image/png', 1.0);
-    pdf.addImage(dataUrl, 'PNG', 0, 0, ptW, ptH, undefined, 'FAST');
+    // Passing canvas directly to avoid Base64 overhead
+    pdf.addImage(canvases[i], 'JPEG', 0, 0, ptW, ptH, undefined, 'MEDIUM');
   }
   return pdf.output('blob');
 }

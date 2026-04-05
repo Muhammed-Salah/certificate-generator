@@ -112,7 +112,26 @@ VALUES (
         'application/octet-stream']
 ) ON CONFLICT (id) DO NOTHING;
 
--- Storage RLS policies for templates bucket
+-- ─── Profiles ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS profiles (
+  id                    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  has_seen_onboarding   BOOLEAN DEFAULT false,
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Auto-update updated_at for profiles
+CREATE TRIGGER profiles_updated_at
+  BEFORE UPDATE ON profiles
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Row Level Security for profiles
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "profiles_select" ON profiles FOR SELECT USING (auth.uid() = id);
+CREATE POLICY "profiles_insert" ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
+CREATE POLICY "profiles_update" ON profiles FOR UPDATE USING (auth.uid() = id);
+
+-- Storage RLS policies for... (existing policies below)
 CREATE POLICY "templates_storage_select" ON storage.objects
   FOR SELECT USING (bucket_id = 'templates' AND (storage.foldername(name))[1] = auth.uid()::text);
 
@@ -131,3 +150,42 @@ CREATE POLICY "fonts_storage_insert" ON storage.objects
 
 CREATE POLICY "fonts_storage_delete" ON storage.objects
   FOR DELETE USING (bucket_id = 'fonts' AND (storage.foldername(name))[1] = auth.uid()::text);
+-- ─── Configuration Versions ────────────────────────────────────
+CREATE TABLE IF NOT EXISTS template_config_versions (
+  id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  template_id       UUID NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+  config_snapshot   JSONB NOT NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Row Level Security for config versions
+ALTER TABLE template_config_versions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "config_versions_select" ON template_config_versions
+  FOR SELECT USING (
+    EXISTS (SELECT 1 FROM templates t WHERE t.id = template_config_versions.template_id AND t.user_id = auth.uid())
+  );
+CREATE POLICY "config_versions_insert" ON template_config_versions
+  FOR INSERT WITH CHECK (
+    EXISTS (SELECT 1 FROM templates t WHERE t.id = template_id AND t.user_id = auth.uid())
+  );
+
+-- ─── Certificate Records ──────────────────────────────────────
+CREATE TABLE IF NOT EXISTS certificate_records (
+  id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id             UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  template_id         UUID NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+  config_version_id   UUID NOT NULL REFERENCES template_config_versions(id) ON DELETE CASCADE,
+  batch_id            UUID,
+  recipient_name      TEXT NOT NULL,
+  dynamic_fields      JSONB DEFAULT '{}'::jsonb,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Row Level Security for certificate records
+ALTER TABLE certificate_records ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "certificate_records_select" ON certificate_records FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "certificate_records_insert" ON certificate_records FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "certificate_records_update" ON certificate_records FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "certificate_records_delete" ON certificate_records FOR DELETE USING (auth.uid() = user_id);

@@ -23,6 +23,7 @@ export interface TemplateConfig {
   name_field: TextField;
   description_field?: RichTextField;
   additional_fields?: CustomTextField[];
+  last_version_id?: string | null;
   updated_at: string;
 }
 

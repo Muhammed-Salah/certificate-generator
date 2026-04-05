@@ -15,12 +15,16 @@ import {
   X,
   Award,
   ChevronRight,
+  HelpCircle,
+  History,
 } from "lucide-react";
+import { useWalkthrough } from "./Walkthrough/WalkthroughProvider";
 
 const NAV = [
   { href: "/dashboard", icon: LayoutDashboard, label: "Overview" },
-  { href: "/dashboard/templates", icon: FileImage, label: "Templates" },
-  { href: "/dashboard/generate", icon: Award, label: "Generate" },
+  { href: "/dashboard/templates", icon: FileImage, label: "Templates", id: "templates-nav" },
+  { href: "/dashboard/generate", icon: Award, label: "Generate", id: "generate-nav" },
+  { href: "/dashboard/history", icon: History, label: "History" },
   { href: "/dashboard/fonts", icon: Settings, label: "Fonts" },
 ];
 
@@ -34,6 +38,8 @@ export default function DashboardShell({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const pathname = usePathname();
   const supabase = createClient();
+
+  const { startTour, stopTour, completeAction, openWelcome } = useWalkthrough();
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -68,7 +74,7 @@ export default function DashboardShell({
       `}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-5 py-5 border-b border-ink-800">
+        <div id="logo-section" className="flex items-center gap-3 px-5 py-5 border-b border-ink-800">
           <div
             className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
             style={{ background: "linear-gradient(135deg, #c9a84c, #e8c96d)" }}
@@ -86,7 +92,7 @@ export default function DashboardShell({
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-          {NAV.map(({ href, icon: Icon, label }) => {
+          {NAV.map(({ href, icon: Icon, label, id }) => {
             const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
             return (
               <Link
@@ -100,7 +106,9 @@ export default function DashboardShell({
                     }
                   }
                   setSidebarOpen(false);
+                  if (id) completeAction(id);
                 }}
+                id={id}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm
                                 transition-all duration-150 group ${
                                   active
@@ -131,18 +139,18 @@ export default function DashboardShell({
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-parchment-100 truncate">
+              <p className="text-sm font-medium text-parchment-100 truncate">
                 {user.user_metadata?.full_name || "User"}
               </p>
               <p className="text-xs text-ink-400 truncate">{user.email}</p>
             </div>
             <button
-              onClick={handleSignOut}
-              className="p-1.5 text-ink-400 hover:text-red-400 rounded transition-colors"
-              title="Sign out"
-            >
-              <LogOut size={15} />
-            </button>
+               onClick={handleSignOut}
+               className="p-2 text-ink-400 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-all"
+               title="Sign out"
+             >
+               <LogOut size={16} />
+             </button>
           </div>
         </div>
       </aside>
@@ -161,7 +169,29 @@ export default function DashboardShell({
             <Award size={18} className="text-accent-gold" />
             <span className="font-display text-lg text-ink-900">Certify</span>
           </div>
+          {/* Walkthrough disabled for now
+          <button 
+            onClick={openWelcome}
+            className="ml-auto p-2 text-ink-400 hover:text-ink-900 rounded-lg hover:bg-ink-50 transition-colors"
+            title="Show Walkthrough"
+          >
+            <HelpCircle size={20} />
+          </button>
+          */}
         </div>
+
+        {/* Desktop Help Icon (Top Right) */}
+        {/* Walkthrough disabled for now
+        <div className="hidden lg:flex absolute top-6 right-8 z-40">
+           <button 
+             onClick={openWelcome}
+             className="btn-glass px-4 py-2 border-ink-100 shadow-sm text-xs font-bold"
+           >
+             <HelpCircle size={14} className="text-accent-gold" />
+             Need Help?
+           </button>
+        </div>
+        */}
 
         <div className="flex-1 overflow-auto">{children}</div>
 

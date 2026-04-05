@@ -1,13 +1,16 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, useMemo, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import type { Template } from '@/types';
 import { Upload, Pencil, Trash2, Settings2, FileImage, Check, X } from 'lucide-react';
+import { useWalkthrough } from "@/components/Walkthrough/WalkthroughProvider";
 import { useDropzone } from 'react-dropzone';
 
 export default function TemplatesPage() {
+  const searchParams = useSearchParams();
+  const action = searchParams.get('action');
   const [templates, setTemplates]     = useState<Template[]>([]);
   const [loading, setLoading]         = useState(true);
   const [uploading, setUploading]     = useState(false);
@@ -15,6 +18,7 @@ export default function TemplatesPage() {
   const [renamingId, setRenamingId]   = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [templateUrls, setTemplateUrls] = useState<Record<string, string>>({});
+  const { completeAction } = useWalkthrough();
   const router   = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
@@ -101,8 +105,12 @@ export default function TemplatesPage() {
       }).select().single();
       if (dbError) throw dbError;
       
-      if (insertData) router.push(`/dashboard/templates/${insertData.id}/configure`);
-      else await load();
+      if (insertData) {
+        completeAction('upload-first');
+        router.push(`/dashboard/templates/${insertData.id}/configure`);
+      } else {
+        await load();
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Upload failed');
     } finally {
@@ -161,8 +169,19 @@ export default function TemplatesPage() {
     }
   }
 
+  useEffect(() => {
+    if (action === 'upload') {
+      const timer = setTimeout(() => {
+        const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+        if (input) input.click();
+      }, 500); // Wait for page to fully load
+      return () => clearTimeout(timer);
+    }
+  }, [action]);
+
   return (
-    <div className="p-6 lg:p-10 max-w-6xl mx-auto animate-fade-in">
+    <Suspense fallback={<div className="p-10 text-center text-ink-300">Loading...</div>}>
+      <div className="p-6 lg:p-10 max-w-6xl mx-auto animate-fade-in">
       <div className="mb-8">
         <h1 className="section-title">Templates</h1>
         <p className="section-sub">Upload and manage your certificate templates</p>
@@ -177,6 +196,7 @@ export default function TemplatesPage() {
 
       {/* Dropzone */}
       <div {...getRootProps()}
+           id="btn-upload-template"
            className={`mb-8 border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all duration-200 ${
              isDragActive ? 'border-accent-gold bg-accent-gold/5' : 'border-ink-200 hover:border-ink-300 hover:bg-parchment-50'
            }`}>
@@ -221,7 +241,7 @@ export default function TemplatesPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {templates.map(t => (
+          {templates.map((t, idx) => (
             <div key={t.id} className="card group hover:shadow-medium transition-all duration-200">
               <div className="relative bg-ink-50 rounded-t-xl overflow-hidden h-44">
                 <TemplatePreview template={t} signedUrl={templateUrls[t.id]} />
@@ -247,16 +267,20 @@ export default function TemplatesPage() {
                 )}
                 <p className="text-xs text-ink-400 mt-1">{t.file_type.toUpperCase()} · {t.width}×{t.height}</p>
                 <div className="flex items-center gap-1 mt-3">
-                  <button onClick={() => router.push(`/dashboard/templates/${t.id}/configure`)}
-                          className="flex-1 btn-secondary py-1.5 text-xs justify-center">
+                    <button onClick={() => {
+                            completeAction('configure-fields');
+                            router.push(`/dashboard/templates/${t.id}/configure`);
+                          }}
+                          id={idx === 0 ? "btn-configure-template" : undefined}
+                          className="flex-1 btn-outline py-1.5 text-xs">
                     <Settings2 size={13}/> Configure
                   </button>
                   <button onClick={() => { setRenamingId(t.id); setRenameValue(t.name); }}
-                          className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-lg transition-colors" title="Rename">
+                          className="p-2 text-ink-400 hover:text-ink-700 hover:bg-ink-50 rounded-xl transition-colors" title="Rename">
                     <Pencil size={14}/>
                   </button>
                   <button onClick={() => handleDelete(t)}
-                          className="p-2 text-ink-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
+                          className="p-2 text-ink-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors" title="Delete">
                     <Trash2 size={14}/>
                   </button>
                 </div>
@@ -265,7 +289,8 @@ export default function TemplatesPage() {
           ))}
         </div>
       )}
-    </div>
+      </div>
+    </Suspense>
   );
 }
 

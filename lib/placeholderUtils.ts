@@ -19,7 +19,7 @@ export function extractPlaceholders(html: string): string[] {
  * @param html The HTML content with placeholders.
  * @param data An object where keys are placeholders (e.g., "{course}") and values are the replacements.
  */
-export function replacePlaceholders(html: string, data: Record<string, string>): string {
+export function replacePlaceholders(html: string, data: Record<string, string>, recipientName?: string): string {
   if (!html) return '';
   let result = html;
   
@@ -27,12 +27,18 @@ export function replacePlaceholders(html: string, data: Record<string, string>):
   const placeholders = extractPlaceholders(html);
   
   placeholders.forEach(placeholder => {
-    // If we have a value in our data object, replace it. Otherwise, leave it or mask it?
-    // User requirement: "Missing values → leave placeholder or fallback text"
-    const value = data[placeholder] !== undefined ? data[placeholder] : data[placeholder.toLowerCase()] !== undefined ? data[placeholder.toLowerCase()] : placeholder;
+    // 1. Check explicit data
+    let value = data[placeholder] !== undefined ? data[placeholder] : data[placeholder.toLowerCase()] !== undefined ? data[placeholder.toLowerCase()] : undefined;
+    
+    // 2. Automated fallback for {Name}
+    if (value === undefined && (placeholder.toLowerCase() === '{name}' || placeholder.toLowerCase() === 'name') && recipientName) {
+      value = recipientName;
+    }
+
+    // 3. Final fallback to placeholder text itself
+    if (value === undefined) value = placeholder;
     
     // Use a global regex to replace all instances of this placeholder
-    // We escape the curly braces for the regex
     const escapedPlaceholder = placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     result = result.replace(new RegExp(escapedPlaceholder, 'g'), value);
   });
@@ -49,7 +55,8 @@ export function highlightPlaceholders(html: string): string {
   const regex = /\{[a-zA-Z0-9_-]+\}/g;
   return html.replace(regex, (match) => {
     // Only force color, allow font-weight/italic to be inherited from user formatting tags
-    return `<span class="placeholder-token" style="color: #3b82f6;">${match}</span>`;
+    // contenteditable="false" makes the token atomic
+    return `<span class="placeholder-token" contenteditable="false" style="color: #3b82f6; user-select: all;">${match}</span>`;
   });
 }
 
@@ -60,19 +67,36 @@ export function highlightPlaceholders(html: string): string {
 export function stripPlaceholderHighlight(html: string): string {
   if (!html) return '';
   // Match any span with class="placeholder-token" and keep only its inner content
-  // This allows us to revert color even when a bracket is deleted midway.
   return html.replace(/<span class="placeholder-token"[^>]*>(.*?)<\/span>/g, '$1');
 }
 
 /**
- * Normalizes an object's keys to ensure they are wrapped in curly braces.
- * Example: { name: "John" } -> { "{name}": "John" }
+ * Normalizes an object's keys based on branding rules:
+ * 1. Skips "Name" or "{Name}" to avoid duplication with 'recipient_name'.
+ * 2. Description-based tokens get {brackets}.
+ * 3. Additional fixed-placement fields (provided in cleanLabels) stay bracket-free.
  */
-export function normalizePlaceholderData(data: Record<string, any>): Record<string, string> {
+export function normalizePlaceholderData(data: Record<string, any>, cleanLabels: string[] = []): Record<string, string> {
   const normalized: Record<string, string> = {};
+  const lowerClean = cleanLabels.map(l => l.toLowerCase());
+
   Object.entries(data).forEach(([key, value]) => {
-    const freshKey = key.startsWith('{') && key.endsWith('}') ? key : `{${key}}`;
-    normalized[freshKey] = String(value || '');
+    const lowerKey = key.toLowerCase();
+    
+    // 1. Skip recipient name duplicates
+    if (lowerKey === 'name' || lowerKey === '{name}') return;
+
+    // 2. Check if it's one of the 'clean' labels (Additional Fields)
+    const cleanMatchIndex = lowerClean.indexOf(lowerKey.replace(/[{}]/g, ''));
+    
+    if (cleanMatchIndex !== -1) {
+       // Keep it bracket-free
+       normalized[cleanLabels[cleanMatchIndex]] = String(value || '');
+    } else {
+       // It's a description token placeholder -> ensure brackets
+       const freshKey = key.startsWith('{') && key.endsWith('}') ? key : `{${key}}`;
+       normalized[freshKey] = String(value || '');
+    }
   });
   return normalized;
 }
