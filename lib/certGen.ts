@@ -2,6 +2,7 @@ import type { Template, TemplateConfig, TextField, RichTextField } from '@/types
 import { PDFDocument, rgb, degrees, StandardFonts, PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { fetchGoogleFontBytes } from './googleFonts';
+import { replacePlaceholders } from './placeholderUtils';
 
 // Helper to convert hex to RGB for pdf-lib
 function hexToRgb(hex: string) {
@@ -47,6 +48,7 @@ function fitFontSize(ctx: CanvasRenderingContext2D, text: string, font: string, 
 interface RenderOptions {
   name: string;
   descriptionHtml?: string;
+  placeholdersData?: Record<string, string>;
   customFieldsData?: Record<string, string>;
   template: Template;
   templateUrl?: string; // Full public Supabase URL for native PDF manipulation
@@ -60,7 +62,7 @@ interface RenderOptions {
  * Preserves original quality by drawing on top of template objects.
  */
 export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<string, ArrayBuffer>): Promise<Uint8Array> {
-  const { name, descriptionHtml, customFieldsData, template, config, templateUrl } = opts;
+  const { name, descriptionHtml, placeholdersData, customFieldsData, template, config, templateUrl } = opts;
   
   if (!templateUrl) throw new Error('templateUrl is required for native PDF manipulation');
   
@@ -192,11 +194,16 @@ export async function renderFidelityPdf(opts: RenderOptions, fontBytes: Record<s
      const df = config.description_field;
      const dBoxW = df.width * width;
      const dFontSize = df.font_size * 0.75;
+
+     const finalHtml = placeholdersData 
+        ? replacePlaceholders(descriptionHtml, placeholdersData) 
+        : descriptionHtml;
+
      const dColor = hexToRgb(df.font_color);
      const dFont = getFont(df.font_family, df.font_weight);
      const lineH = dFontSize * 1.35;
 
-     const fragments = parseHtmlToFragments(descriptionHtml);
+     const fragments = parseHtmlToFragments(finalHtml);
      
      interface StyledLine {
        width: number;
@@ -312,7 +319,7 @@ function parseHtmlToFragments(html: string): Fragment[] {
 }
 
 export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvasElement> {
-  const { name, descriptionHtml, customFieldsData, template, config, templateImageBitmap } = opts;
+  const { name, descriptionHtml, placeholdersData, customFieldsData, template, config, templateImageBitmap } = opts;
   const scale = opts.scale || 1.0;
   if (!templateImageBitmap) throw new Error('Template image bitmap is required for canvas rendering');
 
@@ -414,8 +421,11 @@ export async function renderCertificate(opts: RenderOptions): Promise<HTMLCanvas
   /* ─── Description field ─── */
   if (config.description_field && descriptionHtml !== undefined) {
     const df = config.description_field as RichTextField;
-    const currentHtml = (descriptionHtml || df.content || '').trim();
-    if (currentHtml) {
+    const rawHtml = (descriptionHtml || df.content || '').trim();
+    if (rawHtml) {
+      const currentHtml = placeholdersData 
+        ? replacePlaceholders(rawHtml, placeholdersData) 
+        : rawHtml;
       const dLeft  = (df.x - df.width / 2) * W;
       const dy     = df.y * H;
       const dw     = df.width  * W;

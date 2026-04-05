@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import Papa from 'papaparse';
 import { loadGoogleFont, POPULAR_GOOGLE_FONTS, fetchGoogleFontBytes } from '@/lib/googleFonts';
+import { extractPlaceholders, normalizePlaceholderData, highlightPlaceholders, stripPlaceholderHighlight } from '@/lib/placeholderUtils';
 
 type Step      = 'select' | 'names' | 'generate';
 type OutFormat = 'png' | 'pdf';
@@ -34,6 +35,7 @@ export default function GeneratePage() {
   /* ─── Names ─── */
   const [names, setNames]             = useState<Record<string, string>[]>([{ Name: '' }]);
   const [descOverride, setDescOverride] = useState('');
+  const [placeholders, setPlaceholders] = useState<string[]>([]);
 
   /* ─── Output ─── */
   const [outFormat, setOutFormat] = useState<OutFormat>('pdf');
@@ -180,6 +182,7 @@ export default function GeneratePage() {
       const canvas = await renderCertificate({
         name,
         descriptionHtml: descOverride || config.description_field?.content || '',
+        placeholdersData: normalizePlaceholderData(row),
         customFieldsData,
         template: selected, config,
         templateImageBitmap: bitmap,
@@ -220,7 +223,11 @@ export default function GeneratePage() {
       .maybeSingle();
     setConfig(data as TemplateConfig | null);
     if (data && (data as TemplateConfig).description_field) {
-      setDescOverride((data as TemplateConfig).description_field?.content || '');
+      const html = (data as TemplateConfig).description_field?.content || '';
+      setDescOverride(html);
+      setPlaceholders(extractPlaceholders(html));
+    } else {
+      setPlaceholders([]);
     }
   }, [supabase]);
 
@@ -228,9 +235,9 @@ export default function GeneratePage() {
   const downloadTemplateCsv = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const cols = ['Name', ...(config?.additional_fields?.map(f => f.label) || [])];
+    const cols = ['Name', ...placeholders, ...(config?.additional_fields?.map(f => f.label) || [])];
     const header = cols.join(',');
-    const sample = cols.map(c => c === 'Name' ? 'John Doe' : `Sample ${c}`).join(',');
+    const sample = cols.map(c => c === 'Name' ? 'John Doe' : placeholders.includes(c) ? `Sample ${c.replace(/[{}]/g, '')}` : `Sample ${c}`).join(',');
     const blob = new Blob([header + '\n' + sample], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -253,6 +260,13 @@ export default function GeneratePage() {
         
         const parsed = res.data.map(row => {
            const out: Record<string, string> = { Name: String(row[nameKey] || '') };
+           
+           // Map placeholders exactly
+           placeholders.forEach(p => {
+             const col = res.meta.fields?.find(m => m.trim() === p);
+             if (col) out[p] = String(row[col] || '');
+           });
+
            for (const f of config?.additional_fields || []) {
                const col = res.meta.fields?.find(m => m.toLowerCase() === f.label.toLowerCase());
                if (col) out[f.label] = String(row[col] || '');
@@ -328,6 +342,7 @@ export default function GeneratePage() {
           const pdfBytes = await renderFidelityPdf({
             name: row.Name,
             descriptionHtml: descOverride || config.description_field?.content || '',
+            placeholdersData: normalizePlaceholderData(row),
             customFieldsData,
             template: selected, 
             templateUrl,
@@ -339,6 +354,7 @@ export default function GeneratePage() {
           const canvas = await renderCertificate({
             name: row.Name,
             descriptionHtml: descOverride || config.description_field?.content || '',
+            placeholdersData: normalizePlaceholderData(row),
             customFieldsData,
             template: selected, config,
             templateImageBitmap: bitmap!,
@@ -370,6 +386,7 @@ export default function GeneratePage() {
              const pdfBytes = await renderFidelityPdf({
                 name: row.Name,
                 descriptionHtml: descOverride || config.description_field?.content || '',
+                placeholdersData: normalizePlaceholderData(row),
                 customFieldsData,
                 template: selected, 
                 templateUrl,
@@ -381,6 +398,7 @@ export default function GeneratePage() {
              const canvas = await renderCertificate({
                 name: row.Name,
                 descriptionHtml: descOverride || config.description_field?.content || '',
+                placeholdersData: normalizePlaceholderData(row),
                 customFieldsData,
                 template: selected, config,
                 templateImageBitmap: bitmap!,
@@ -501,7 +519,7 @@ export default function GeneratePage() {
                             isSel ? 'ring-2 ring-accent-gold border-accent-gold/50' : ''
                           }`}>
                     <div className="h-36 bg-ink-50 relative">
-                      <TemplatePreview template={t} getPublicUrl={(p) => supabase.storage.from('templates').getPublicUrl(p).data.publicUrl} />
+                      <TemplatePreview template={t} supabase={supabase} />
                       {isSel && (
                         <div className="absolute inset-0 bg-accent-gold/20 flex items-center justify-center">
                           <div className="w-8 h-8 rounded-full bg-accent-gold flex items-center justify-center">
@@ -579,9 +597,22 @@ export default function GeneratePage() {
                         )}
                       </div>
                       
-                      {config?.additional_fields && config.additional_fields.length > 0 && (
+                      {((config?.additional_fields && config.additional_fields.length > 0) || (placeholders.length > 0)) && (
                         <div className="grid grid-cols-2 gap-2 mt-1">
-                           {config.additional_fields.map(f => (
+                           {placeholders.map(p => (
+                             <input 
+                               key={p}
+                               className="input py-1.5 text-xs bg-white border-blue-100 focus:border-blue-300"
+                               placeholder={p}
+                               value={n[p] || ''}
+                               onChange={e => {
+                                 const next = [...names];
+                                 next[i] = { ...next[i], [p]: e.target.value };
+                                 setNames(next);
+                               }}
+                             />
+                           ))}
+                           {config?.additional_fields?.map(f => (
                              <input 
                                key={f.id}
                                className="input py-1.5 text-xs bg-white"
@@ -622,6 +653,9 @@ export default function GeneratePage() {
                   <p className="text-sm text-ink-600 font-medium">Drop CSV or click to browse</p>
                   <div className="text-xs text-ink-400 mt-2 flex flex-wrap items-center justify-center gap-1">
                     Columns required: <span className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">Name</span>
+                    {placeholders.map(p => (
+                       <span key={p} className="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded shadow-sm border border-blue-100">{p}</span>
+                    ))}
                     {config?.additional_fields?.map(f => (
                        <span key={f.id} className="font-mono text-ink-600 bg-ink-100 px-1.5 py-0.5 rounded shadow-sm">{f.label}</span>
                     ))}
@@ -646,18 +680,73 @@ export default function GeneratePage() {
                     className="rich-editor input rounded-lg p-3 min-h-[60px]"
                     data-placeholder="Start typing..."
                     style={{ fontFamily: config.description_field.font_family, fontSize: '14px' }}
-                    onBlur={e => setDescOverride((e.target as HTMLDivElement).innerHTML)}
+                    onInput={e => {
+                      const el = e.target as HTMLDivElement;
+                      const html = el.innerHTML;
+                      const clean = stripPlaceholderHighlight(html);
+                      if (descOverride !== clean) setDescOverride(clean);
+
+                      const selection = window.getSelection();
+                      if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return;
+                      
+                      const range = selection.getRangeAt(0);
+                      if (html.includes('{') || html.includes('<span')) {
+                        const preSelectionRange = range.cloneRange();
+                        preSelectionRange.selectNodeContents(el);
+                        preSelectionRange.setEnd(range.startContainer, range.startOffset);
+                        const start = preSelectionRange.toString().length;
+
+                        const highlighted = highlightPlaceholders(clean);
+                        if (html !== highlighted) {
+                           el.innerHTML = highlighted;
+                           const restore = (node: Node, chars: { count: number }) => {
+                             if (chars.count < 0) return;
+                             if (node.nodeType === 3) {
+                               if (node.textContent!.length >= chars.count) {
+                                 const r = document.createRange();
+                                 r.setStart(node, chars.count); r.collapse(true);
+                                 const s = window.getSelection();
+                                 s?.removeAllRanges(); s?.addRange(r);
+                                 chars.count = -1;
+                               } else { chars.count -= node.textContent!.length; }
+                             } else {
+                               for (const child of Array.from(node.childNodes)) {
+                                 restore(child, chars); if (chars.count < 0) break;
+                               }
+                             }
+                           };
+                           restore(el, { count: start });
+                        }
+                      }
+                    }}
+                    onKeyDown={e => {
+                      if ((e.ctrlKey || e.metaKey) && ['b', 'i', 'u'].includes(e.key.toLowerCase())) {
+                        e.preventDefault();
+                        const cmd = e.key.toLowerCase() === 'b' ? 'bold' : e.key.toLowerCase() === 'i' ? 'italic' : 'underline';
+                        document.execCommand(cmd);
+                        setDescOverride(stripPlaceholderHighlight(e.currentTarget.innerHTML));
+                      }
+                    }}
+                    onBlur={e => {
+                      const el = e.target as HTMLDivElement;
+                      el.innerHTML = highlightPlaceholders(stripPlaceholderHighlight(el.innerHTML));
+                    }}
                     onPaste={e => {
                       e.preventDefault();
                       const text = e.clipboardData.getData('text/plain');
                       document.execCommand('insertText', false, text);
                     }}
-                    dangerouslySetInnerHTML={{ __html: descOverride || '' }}
+                    ref={el => { if (el && !el.innerHTML && descOverride) el.innerHTML = highlightPlaceholders(descOverride); }}
                   />
                   <div className="flex gap-1 mt-1.5">
                     {(['bold','italic','underline'] as const).map(cmd => (
                       <button key={cmd} type="button"
-                              onMouseDown={e => { e.preventDefault(); document.execCommand(cmd); setDescOverride((e.target as any).parentElement.previousElementSibling.innerHTML); }}
+                              onMouseDown={e => { 
+                                e.preventDefault(); 
+                                document.execCommand(cmd); 
+                                const editor = e.currentTarget.parentElement?.previousElementSibling as HTMLDivElement;
+                                if (editor) setDescOverride(stripPlaceholderHighlight(editor.innerHTML));
+                              }}
                               className="px-2 py-1 text-xs border border-ink-200 rounded hover:bg-ink-50 text-ink-600 capitalize">
                         {cmd}
                       </button>
@@ -814,39 +903,73 @@ export default function GeneratePage() {
   );
 }
 
-function TemplatePreview({ template, getPublicUrl }: { template: Template, getPublicUrl: (p: string) => string }) {
-  const [url, setUrl] = useState<string | null>(template.file_type === 'png' ? getPublicUrl(template.file_path) : null);
-  const [loading, setLoading] = useState(template.file_type === 'pdf');
+function TemplatePreview({ template, supabase }: { template: Template, supabase: any }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (template.file_type === 'pdf') {
-       const cacheKey = `thumb-pdf-${template.id}`;
-       const cached = typeof window !== 'undefined' ? localStorage.getItem(cacheKey) : null;
-       if (cached) {
-         setUrl(cached);
-         setLoading(false);
-         return;
-       }
-
-       (async () => {
-         try {
-           const { loadPdfPageBitmap } = await import('@/lib/certGen');
-           const { bitmap } = await loadPdfPageBitmap(getPublicUrl(template.file_path));
-           const canvas = document.createElement('canvas');
-           canvas.width = bitmap.width; canvas.height = bitmap.height;
-           const ctx = canvas.getContext('2d');
-           if (ctx) ctx.drawImage(bitmap, 0, 0);
-           const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
-           setUrl(dataUrl);
-           try { localStorage.setItem(cacheKey, dataUrl); } catch(e) { console.warn('Cache full', e); }
-         } catch (e) {
-           console.error(e);
-         } finally {
-           setLoading(false);
-         }
-       })();
+    let cancelled = false;
+    const cacheKey = `thumb-${template.id}`;
+    
+    // 1. Try cache
+    const cached = typeof window !== 'undefined' ? localStorage.getItem(cacheKey) : null;
+    if (cached) {
+      setUrl(cached);
+      setLoading(false);
+      return;
     }
-  }, [template, getPublicUrl]);
+
+    // 2. Generate thumbnail from signed URL
+    (async () => {
+      try {
+        const { data: signedData } = await supabase.storage.from('templates').createSignedUrl(template.file_path, 3600);
+        if (!signedData || cancelled) return;
+        const fileUrl = signedData.signedUrl;
+
+        let bitmap: ImageBitmap;
+        if (template.file_type === 'pdf') {
+          const { loadPdfPageBitmap } = await import('@/lib/certGen');
+          const res = await loadPdfPageBitmap(fileUrl);
+          bitmap = res.bitmap;
+        } else {
+          const { loadImageBitmap } = await import('@/lib/certGen');
+          bitmap = await loadImageBitmap(fileUrl);
+        }
+
+        if (cancelled) return;
+
+        // Create small thumbnail to save memory and handle high-res efficiently
+        const canvas = document.createElement('canvas');
+        const maxDim = 512;
+        let w = bitmap.width;
+        let h = bitmap.height;
+        if (w > h) {
+          if (w > maxDim) { h = (h * maxDim) / w; w = maxDim; }
+        } else {
+          if (h > maxDim) { w = (w * maxDim) / h; h = maxDim; }
+        }
+        canvas.width = w;
+        canvas.height = h;
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(bitmap, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+          if (!cancelled) setUrl(dataUrl);
+          try { localStorage.setItem(cacheKey, dataUrl); } catch(e) { 
+            // If localStorage is full, we just don't cache this one
+            console.warn('Thumbnail cache full, skipping localStorage for:', template.name);
+          }
+        }
+      } catch (e) {
+        console.error('Thumbnail generation error:', e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [template, supabase]);
 
   if (loading) {
      return (
@@ -866,5 +989,5 @@ function TemplatePreview({ template, getPublicUrl }: { template: Template, getPu
   }
 
   /* eslint-disable-next-line @next/next/no-img-element */
-  return <img src={url} alt={template.name} className="w-full h-full object-cover" />;
+  return <img src={url} alt={template.name} className="w-full h-full object-cover animate-fade-in" />;
 }

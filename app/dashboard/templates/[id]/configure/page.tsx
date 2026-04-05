@@ -2,11 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { extractPlaceholders, highlightPlaceholders, stripPlaceholderHighlight } from '@/lib/placeholderUtils';
 import { createClient } from '@/lib/supabase/client';
 import type { Template, TemplateConfig, TextField, RichTextField, CustomTextField, FontRecord } from '@/types';
 import {
   Save, ArrowLeft, Type, AlignLeft, AlignCenter, AlignRight,
-  ChevronDown, Palette, Info, Grid3X3, Magnet, PlusCircle, Trash2
+  ChevronDown, Palette, Info, Grid3X3, Magnet, PlusCircle, Trash2,
+  AlignHorizontalJustifyCenter, AlignVerticalJustifyCenter
 } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
 import FontPicker from '@/components/FontPicker';
@@ -75,11 +77,24 @@ export default function ConfigurePage() {
   const lastStateBeforeDown = useRef<DragTarget>(null);
 
   const [showGrid, setShowGrid]     = useState(true);
-  const [gridSize, setGridSize]     = useState(5);
+  const [gridSize, setGridSize]     = useState(10);
   const [snapToGrid, setSnapToGrid] = useState(false);
   const [selectedElement, setSelectedElement] = useState<DragTarget>(null);
   const [showLimitGuide, setShowLimitGuide]   = useState(false);
   const limitGuideTimer = useRef<NodeJS.Timeout | null>(null);
+  
+  const centerField = useCallback((axis: 'x' | 'y') => {
+    if (!selectedElement) return;
+    const val = 0.5;
+    if (selectedElement === 'name') {
+      setNameField(p => ({ ...p, [axis]: val }));
+    } else if (selectedElement === 'description') {
+      setDescField(p => ({ ...p, [axis]: val }));
+    } else {
+      setAdditionalFields(p => p.map(f => f.id === selectedElement ? { ...f, [axis]: val } : f));
+    }
+    window.__unsavedChanges = true;
+  }, [selectedElement]);
 
   const triggerLimitGuide = useCallback(() => {
     setShowLimitGuide(true);
@@ -275,9 +290,9 @@ export default function ConfigurePage() {
       let nx = Math.max(0, Math.min(1, dragStart.current.fx + adx));
       let ny = Math.max(0, Math.min(1, dragStart.current.fy + ady));
       if (snapToGrid && showGrid) {
-        const step = gridSize / 100;
-        nx = Math.round(nx / step) * step;
-        ny = Math.round(ny / step) * step;
+        const step = 1 / gridSize;
+        nx = Math.max(0, Math.min(1, Math.round(nx / step) * step));
+        ny = Math.max(0, Math.min(1, Math.round(ny / step) * step));
       }
       
       if (dragging.current === 'name') {
@@ -320,7 +335,8 @@ export default function ConfigurePage() {
 
       if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
         e.preventDefault();
-        const step = (snapToGrid && showGrid) ? (gridSize / 100) : 0.005; 
+        const gridStep = 1 / gridSize;
+        const step = (snapToGrid && showGrid) ? gridStep : 0.005; 
         const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
         const dy = e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
         
@@ -647,14 +663,34 @@ export default function ConfigurePage() {
             <div className="absolute inset-0 bg-blue-500/10" />
           </div>
 
-          {showGrid && (
-            <div className="absolute inset-0 pointer-events-none opacity-20 z-0"
-                 style={{ 
-                   backgroundImage: 'linear-gradient(to right, #000 1px, transparent 1px), linear-gradient(to bottom, #000 1px, transparent 1px)', 
-                   backgroundSize: `${gridSize}% ${gridSize}%` 
-                 }} 
-            />
-          )}
+          {showGrid && (() => {
+            const step = 100 / gridSize;
+            return (
+              <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden select-none" style={{ width: '100%', height: '100%' }}>
+                {/* Horizontal Grid Lines */}
+                <div 
+                  className="absolute inset-0 opacity-[0.1]" 
+                  style={{
+                    backgroundImage: `repeating-linear-gradient(to bottom, #000 0, #000 1px, transparent 1px, transparent ${step}%)`
+                  }} 
+                />
+                {/* Vertical Grid Lines */}
+                <div 
+                  className="absolute inset-0 opacity-[0.1]" 
+                  style={{
+                    backgroundImage: `repeating-linear-gradient(to right, #000 0, #000 1px, transparent 1px, transparent ${step}%)`
+                  }} 
+                />
+                
+                {/* Mathematical Center Guidelines */}
+                <div className="absolute left-1/2 top-0 bottom-0 w-px bg-blue-600/80 z-10 -translate-x-1/2" />
+                <div className="absolute top-1/2 left-0 right-0 h-px bg-blue-600/80 z-10 -translate-y-1/2" />
+                
+                {/* Inner Border to verify edge alignment */}
+                <div className="absolute inset-0 border border-ink-900/5 z-10" />
+              </div>
+            );
+          })()}
 
           {/* Overlays — shown once image is measured */}
           {(imgLoaded || template.file_type === 'pdf') && (
@@ -807,12 +843,22 @@ export default function ConfigurePage() {
               <Grid3X3 size={14}/> {showGrid ? 'Grid On' : 'Grid Off'}
             </button>
             <div className={`flex items-center bg-ink-50 rounded border border-ink-200 ml-1 transition-opacity ${!showGrid ? 'opacity-30 pointer-events-none' : ''}`}>
-              <button disabled={!showGrid || gridSize <= 1}
-                      onClick={() => setGridSize(p => Math.max(1, p - 1))}
+              <button disabled={!showGrid || gridSize <= 2}
+                      onClick={() => setGridSize(p => Math.max(2, p - 2))}
                       className="px-2 py-0.5 hover:bg-ink-100 disabled:opacity-50 text-ink-700">-</button>
-              <span className="text-xs w-8 text-center font-medium text-ink-700">{gridSize}%</span>
-              <button disabled={!showGrid || gridSize >= 20}
-                      onClick={() => setGridSize(p => Math.min(20, p + 1))}
+              
+              <div className="flex items-center gap-1 px-1">
+                <NumericInput 
+                  min={2} 
+                  value={gridSize} 
+                  onChange={v => setGridSize(Math.round(Math.min(100, Math.max(2, v)) / 2) * 2)}
+                  className="bg-transparent border-none text-xs w-8 text-center font-bold text-ink-900 focus:outline-none focus:ring-0 selection:bg-accent-gold/30"
+                />
+                <span className="text-[9px] font-black uppercase text-ink-400 tracking-tighter pr-1">Cells</span>
+              </div>
+
+              <button disabled={!showGrid || gridSize >= 100}
+                      onClick={() => setGridSize(p => Math.min(100, p + 2))}
                       className="px-2 py-0.5 hover:bg-ink-100 disabled:opacity-50 text-ink-700">+</button>
             </div>
           </div>
@@ -826,6 +872,31 @@ export default function ConfigurePage() {
             }`}>
             <Magnet size={14}/> {snapToGrid ? 'Snap On' : 'Snap Off'}
           </button>
+
+          <div className="w-px h-4 bg-ink-200"/>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => centerField('x')}
+              disabled={!selectedElement}
+              type="button"
+              title="Center Horizontally"
+              className={`p-2 rounded-lg text-ink-500 transition-all ${
+                !selectedElement ? 'opacity-30 cursor-not-allowed' : 'hover:bg-ink-100 hover:text-ink-900 active:scale-95'
+              }`}>
+              <AlignHorizontalJustifyCenter size={16}/>
+            </button>
+            <button
+              onClick={() => centerField('y')}
+              disabled={!selectedElement}
+              type="button"
+              title="Center Vertically"
+              className={`p-2 rounded-lg text-ink-500 transition-all ${
+                !selectedElement ? 'opacity-30 cursor-not-allowed' : 'hover:bg-ink-100 hover:text-ink-900 active:scale-95'
+              }`}>
+              <AlignVerticalJustifyCenter size={16}/>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -838,8 +909,11 @@ function NumericInput({ value, min, onChange, className }: { value: number; min:
 
   return (
     <input 
-      type="number" min={min} value={local} className={className}
-      onChange={e => setLocal(e.target.value)}
+      type="text" inputMode="numeric" value={local} className={className}
+      onChange={e => {
+        const val = e.target.value.replace(/[^0-9]/g, '');
+        setLocal(val);
+      }}
       onBlur={() => {
         let n = parseInt(local, 10);
         if (isNaN(n)) n = value;
@@ -904,9 +978,9 @@ function FieldControls({
 
       {/* Font size */}
       <div>
-        <label className="label">Font Size <span className="text-ink-400 normal-case font-normal">(px at full resolution)</span></label>
+        <label className="label">Font Size <span className="text-ink-400 normal-case font-normal">(px at full resolution — use larger values for high-res images)</span></label>
         <div className="flex items-center gap-2">
-          <input type="range" min={1} max={120} value={field.font_size}
+          <input type="range" min={1} max={1000} value={field.font_size}
                  onChange={e => onChange('font_size', +e.target.value)}
                  className="flex-1 accent-ink-900"/>
           <NumericInput min={1} value={field.font_size} onChange={v => onChange('font_size', v)}
@@ -999,25 +1073,97 @@ function FieldControls({
 
       {/* Default description content */}
       {'content' in field && (
-        <div>
-          <label className="label">Default Content</label>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="label mb-0">Default Content</label>
+            <div className="flex items-center gap-1.5 text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-bold border border-blue-100">
+              <Info size={10} /> Supports {`{tokens}`}
+            </div>
+          </div>
+          <p className="text-[10px] text-ink-400 -mt-1 italic leading-tight">
+            Use tags like <code className="text-blue-500 font-bold">{`{course}`}</code>, <code className="text-blue-500 font-bold">{`{date}`}</code>, or <code className="text-blue-500 font-bold">{`{grade}`}</code>. 
+            They will be replaced with real data during generation.
+          </p>
           <div
             contentEditable suppressContentEditableWarning
             className="rich-editor input rounded-lg p-3 min-h-[70px]"
             data-placeholder="Enter default description text…"
             style={{ fontFamily: field.font_family, fontSize: '14px' }}
-            onBlur={e => onChange('content', (e.target as HTMLDivElement).innerHTML)}
+            onInput={e => {
+              const el = e.target as HTMLDivElement;
+              const html = el.innerHTML;
+              const clean = stripPlaceholderHighlight(html);
+              
+              if (field.content !== clean) onChange('content', clean);
+
+              const selection = window.getSelection();
+              if (!selection || selection.rangeCount === 0) return;
+              
+              // CRITICAL: If there is an active selection (user is highlighting text),
+              // DO NOT re-apply highlights, as el.innerHTML = ... will kill the selection.
+              if (!selection.isCollapsed) return;
+
+              const range = selection.getRangeAt(0);
+              if (html.includes('{') || html.includes('<span')) {
+                const preSelectionRange = range.cloneRange();
+                preSelectionRange.selectNodeContents(el);
+                preSelectionRange.setEnd(range.startContainer, range.startOffset);
+                const start = preSelectionRange.toString().length;
+
+                const highlighted = highlightPlaceholders(clean);
+                if (html !== highlighted) {
+                   el.innerHTML = highlighted;
+                   const restore = (node: Node, chars: { count: number }) => {
+                     if (chars.count < 0) return;
+                     if (node.nodeType === 3) {
+                       if (node.textContent!.length >= chars.count) {
+                         const r = document.createRange();
+                         r.setStart(node, chars.count); r.collapse(true);
+                         const s = window.getSelection();
+                         s?.removeAllRanges(); s?.addRange(r);
+                         chars.count = -1;
+                       } else { chars.count -= node.textContent!.length; }
+                     } else {
+                       for (const child of Array.from(node.childNodes)) {
+                         restore(child, chars); if (chars.count < 0) break;
+                       }
+                     }
+                   };
+                   restore(el, { count: start });
+                }
+              }
+            }}
+            onKeyDown={e => {
+              if ((e.ctrlKey || e.metaKey) && ['b', 'i', 'u'].includes(e.key.toLowerCase())) {
+                e.preventDefault();
+                const cmd = e.key.toLowerCase() === 'b' ? 'bold' : e.key.toLowerCase() === 'i' ? 'italic' : 'underline';
+                document.execCommand(cmd);
+                // Trigger sync manually because execCommand doesn't always fire input events
+                onChange('content', stripPlaceholderHighlight(e.currentTarget.innerHTML));
+              }
+            }}
+            onBlur={e => {
+              const el = e.target as HTMLDivElement;
+              el.innerHTML = highlightPlaceholders(stripPlaceholderHighlight(el.innerHTML));
+            }}
             onPaste={e => {
               e.preventDefault();
               const text = e.clipboardData.getData('text/plain');
               document.execCommand('insertText', false, text);
             }}
-            dangerouslySetInnerHTML={{ __html: (field as RichTextField).content }}
+            // Only set initial HTML to avoid cursor resetting during parent re-renders
+            ref={el => { if (el && !el.innerHTML && (field as RichTextField).content) el.innerHTML = highlightPlaceholders((field as RichTextField).content || ''); }}
           />
           <div className="flex gap-1 mt-1.5">
             {(['bold','italic','underline'] as const).map(cmd => (
               <button key={cmd} type="button"
-                      onMouseDown={e => { e.preventDefault(); document.execCommand(cmd); }}
+                      onMouseDown={e => { 
+                        e.preventDefault(); 
+                        document.execCommand(cmd); 
+                        // Trigger sync for preview
+                        const editor = e.currentTarget.parentElement?.previousElementSibling as HTMLDivElement;
+                        if (editor) onChange('content', stripPlaceholderHighlight(editor.innerHTML));
+                      }}
                       className="px-2 py-1 text-xs border border-ink-200 rounded hover:bg-ink-50 text-ink-600 capitalize inline-flex items-center gap-1">
                 <Type size={10}/>{cmd}
               </button>

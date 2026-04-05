@@ -165,13 +165,39 @@ export default function DashboardShell({
 
         <div className="flex-1 overflow-auto">{children}</div>
 
-        {/* Floating Credit Label */}
-        <div className="fixed bottom-4 right-4 z-50 pointer-events-none">
+        {/* Floating Actions */}
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3 pointer-events-none">
+          {/* Chai4Me Support Button */}
+          <a 
+            href="https://chai4.me/salah" 
+            target="_blank" 
+            title="Support salah on Chai4Me" 
+            className="pointer-events-auto transition-transform duration-200 hover:scale-105 active:scale-95 shadow-xl rounded-2xl overflow-hidden"
+            style={{
+              display: 'inline-flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: '#ffffff',
+              padding: '8px 24px',
+              borderRadius: '16px',
+              textDecoration: 'none',
+              border: '1px solid #e5e7eb',
+            }}
+          >
+            <img 
+              src="https://chai4.me/icons/wordmark.png" 
+              alt="Chai4Me" 
+              style={{ height: '28px', objectFit: 'contain' }}
+            />
+          </a>
+
+          {/* Credit Label */}
           <a
             href="https://www.linkedin.com/in/muhammed-salah-kt/"
             target="_blank"
             rel="noopener noreferrer"
-            className="px-3 py-1.5 rounded-full bg-white/40 backdrop-blur-md border border-white/40 shadow-sm flex items-center gap-2 pointer-events-auto hover:bg-white/60 transition-all duration-200"
+            className="px-3 py-1.5 rounded-full bg-white/60 backdrop-blur-md border border-white/40 shadow-sm flex items-center gap-2 pointer-events-auto hover:bg-white/80 transition-all duration-200"
           >
             <span className="text-[10px] font-medium text-ink-500 whitespace-nowrap">
               Made with ❤️ by <span className="font-bold underline">Salah</span> using <span className="font-bold">AI</span>.
